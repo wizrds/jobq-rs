@@ -1,0 +1,11 @@
+[package]
+name = "jobq"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+repository.workspace = true
+license.workspace = true
+readme.workspace = true
+
+[dependencies]
+jobq-core = { path = "../jobq-core", version = "0.0.0" }

@@ -1,0 +1,39 @@
+version: '3'
+
+tasks:
+  update-cargo-lock:
+    cmds: 
+      - cargo update
+
+  fmt:
+    desc: Format the code
+    cmds:
+      - >
+        cargo fmt --all -- --check
+
+  fmt:fix:
+    desc: Format the code
+    cmds:
+      - >
+        cargo fmt --all
+
+  lint:
+    desc: Lint the code
+    cmds:
+      - >
+        cargo clippy --all-targets --all-features
+
+  lint:fix:
+    desc: Lint the code
+    cmds:
+      - >
+        cargo clippy --fix --all-targets --all-features --allow-dirty --allow-staged
+
+  test:
+    cmds:
+      - cargo test --all-features {{.CLI_ARGS}}
+
+  build:
+    desc: Build the application
+    cmds:
+      - cargo build --all-features {{.CLI_ARGS}}

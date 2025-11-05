@@ -1,0 +1,223 @@
+version: '3'
+
+includes:
+  devtools:
+    taskfile: devtools.yml
+
+tasks:
+  current:
+    desc: Print the version
+    deps: [devtools:install]
+    cmds:
+      - svu current --strip-prefix {{.CLI_ARGS}}
+
+  next:
+    desc: Get the next version given SemVer
+    deps: [devtools:install]
+    cmds:
+      - |
+        NEXT=$(svu next --strip-prefix {{.CLI_ARGS}})
+        if [ -n "{{.PRE_RELEASE}}" ]; then
+          NEXT="$NEXT-{{.PRE_RELEASE}}"
+        fi
+        if [ -n "{{.BUILD_NUMBER}}" ]; then
+          NEXT="$NEXT+{{.BUILD_NUMBER}}"
+        fi
+        echo $NEXT
+
+  update:rust:single:
+    desc: Update the version in a single Rust crate
+    cmds:
+      - |
+        NEXT_VERSION="{{.NEXT_VERSION}}"
+        VERSION_FILE="{{or .VERSION_FILE "Cargo.toml"}}"
+
+        if [ -z "$NEXT_VERSION" ] || [ -z "$VERSION_FILE" ]; then
+          echo "NEXT_VERSION and VERSION_FILE are required"
+          exit 1
+        fi
+
+        if [ ! -f "$VERSION_FILE" ]; then
+          echo "Missing version file: $VERSION_FILE"
+          exit 1
+        fi
+
+        sed -i "/^version = ".*"/c\version = \"$NEXT_VERSION\"" $VERSION_FILE
+        echo $VERSION_FILE
+
+  update:rust:multi:
+    desc: Update the version in multiple Rust crates
+    cmds:
+      - |
+        NEXT_VERSION="{{.NEXT_VERSION}}"
+        PACKAGES=({{.PACKAGES}})
+        VERSION_FILE="{{or .VERSION_FILE "Cargo.toml"}}"
+
+        if [ ${#PACKAGES[@]} -eq 0 ]; then
+          echo "PACKAGES are required"
+          exit 1
+        fi
+
+        for crate in "${PACKAGES[@]}"; do
+          vfile="$crate/$VERSION_FILE"
+
+          if [ ! -f "$vfile" ]; then
+            echo "Missing version file: $vfile"
+            exit 1
+          fi
+
+          sed -i "/^version = ".*"/c\version = \"$NEXT_VERSION\"" $vfile
+          echo $vfile
+
+          for dep in "${PACKAGES[@]}"; do
+            dep_name=$(basename "$dep")
+            sed -i -E "s|(${dep_name}.*version = \")([^\"]+)(\")|\1$NEXT_VERSION\3|" "$vfile"
+          done
+        done
+
+        if [ -f "$VERSION_FILE" ]; then
+          sed -i "/^version = ".*"/c\version = \"$NEXT_VERSION\"" $VERSION_FILE
+          echo $VERSION_FILE
+        fi
+
+  update:python:single:
+    desc: Update the version in a single Python package
+    cmds:
+      - |
+        NEXT_VERSION="{{.NEXT_VERSION}}"
+        VERSION_FILE="{{or .VERSION_FILE "pyproject.toml"}}"
+
+        if [ -z "$NEXT_VERSION" ] || [ -z "$VERSION_FILE" ]; then
+          echo "NEXT_VERSION and VERSION_FILE are required"
+          exit 1
+        fi
+
+        if [ ! -f "$VERSION_FILE" ]; then
+          echo "Missing version file: $VERSION_FILE"
+          exit 1
+        fi
+
+        sed -i "/^version = ".*"/c\version = \"$NEXT_VERSION\"" $VERSION_FILE
+        echo $VERSION_FILE
+
+  update:nodejs:single:
+    desc: Update the version in a single Node.js package
+    cmds:
+      - |
+        NEXT_VERSION="{{.NEXT_VERSION}}"
+        VERSION_FILE="{{or .VERSION_FILE "package.json"}}"
+
+        if [ -z "$NEXT_VERSION" ] || [ -z "$VERSION_FILE" ]; then
+          echo "NEXT_VERSION and VERSION_FILE are required"
+          exit 1
+        fi
+
+        if [ ! -f "$VERSION_FILE" ]; then
+          echo "Missing version file: $VERSION_FILE"
+          exit 1
+        fi
+
+        sed -i "/^\s*"version": ".*",/c\"version\": \"$NEXT_VERSION\"," $VERSION_FILE
+        echo $VERSION_FILE
+
+  update:single-package:
+    desc: Update the version of a single package
+    cmds:
+      - |
+        LANGUAGE="{{.LANGUAGE}}"
+        VERSION_FILE="{{.VERSION_FILE}}"
+        NEXT_VERSION="{{.NEXT_VERSION}}"
+
+        if [ -z "$LANGUAGE" ]; then
+          echo "LANGUAGE is required"
+          exit 1
+        fi
+
+        case $LANGUAGE in
+          rust)
+            task version:update:rust:single VERSION_FILE="$VERSION_FILE" NEXT_VERSION="$NEXT_VERSION"
+            ;;
+          python)
+            task version:update:python:single VERSION_FILE="$VERSION_FILE" NEXT_VERSION="$NEXT_VERSION"
+            ;;
+          nodejs)
+            task version:update:nodejs:single VERSION_FILE="$VERSION_FILE" NEXT_VERSION="$NEXT_VERSION"
+            ;;
+          *)
+            echo "Unsupported language: $LANGUAGE"
+            exit 1
+            ;;
+        esac
+
+  update:multi-package:
+    desc: Update the version of multiple packages
+    cmds:
+      - |
+        LANGUAGE="{{.LANGUAGE}}"
+        NEXT_VERSION="{{.NEXT_VERSION}}"
+        PACKAGES="{{.PACKAGES}}"
+        VERSION_FILE="{{.VERSION_FILE}}"
+
+        if [ -z "$LANGUAGE" ]; then
+          echo "LANGUAGE is required"
+          exit 1
+        fi
+
+        case $LANGUAGE in
+          rust)
+            task version:update:rust:multi VERSION_FILE="$VERSION_FILE" PACKAGES="$PACKAGES" NEXT_VERSION="$NEXT_VERSION"
+            ;;
+          python)
+            echo "Python multi-package update is not implemented yet."
+            ;;
+          nodejs)
+            echo "Node.js multi-package update is not implemented yet."
+            exit 1
+            ;;
+          *)
+            echo "Unsupported language: $LANGUAGE"
+            exit 1
+            ;;
+        esac
+
+  changelog:
+    desc: Generate the changelog
+    deps: [devtools:install]
+    cmds:
+      - git-chglog {{.CLI_ARGS}}
+
+  bump:
+    desc: Bump version and update all relevant files
+    deps: [devtools:install]
+    cmds:
+      - |
+        # Version calculation remains the same
+        export CURRENT_VERSION=$(svu current --strip-prefix)
+        export NEXT_VERSION=$(svu next --strip-prefix)
+        [ "$CURRENT_VERSION" == "$NEXT_VERSION" ] && exit 1
+
+        # Apply metadata if specified
+        [ -n "{{.PRE_RELEASE}}" ] && NEXT_VERSION="$NEXT_VERSION-{{.PRE_RELEASE}}"
+        [ -n "{{.BUILD_METADATA}}" ] && NEXT_VERSION="$NEXT_VERSION+{{.BUILD_METADATA}}"
+
+        # Generate changelog
+        echo "Generating changelog..."
+        git-chglog -o CHANGELOG.md --next-tag $NEXT_VERSION || true
+        echo "CHANGELOG.md" > .modified_files
+
+        # Update version files
+        task version:update:multi-package \
+          LANGUAGE=rust \
+          VERSION_FILE=Cargo.toml \
+          PACKAGES="jobq-core jobq" >> .modified_files
+
+        # Add all modified files to git
+        while read -r file; do
+          [ -f "$file" ] && echo "Adding $file to git staging" && git add "$file"
+        done < .modified_files
+
+        # Commit and tag
+        echo "Committing and tagging the release..."
+        git commit -m "chore(release): Release $NEXT_VERSION"
+        git tag "$NEXT_VERSION" -m "chore(release): Release $NEXT_VERSION"
+        rm .modified_files

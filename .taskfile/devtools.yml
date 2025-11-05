@@ -1,0 +1,157 @@
+version: '3'
+
+tasks:
+  download-binary:
+    desc: Download a binary from GitHub releases
+    cmds:
+      - |
+        if [ -z "{{.REPO}}" ] || [ -z "{{.TAG}}" ] || [ -z "{{.BINARY}}" ]; then
+            echo "REPO TAG, and BINARY are required"
+            exit 1
+        fi
+
+        if [ -z "{{.DEBUG}}" ]; then
+            DEBUG="false"
+        else
+            DEBUG="{{.DEBUG}}"
+        fi
+
+        if [ -z "{{.EXTRACT_PATH}}" ]; then
+            EXTRACT_PATH="/usr/local/bin"
+        else
+            EXTRACT_PATH=$(echo "{{.EXTRACT_PATH}}" | sed 's:/*$::')
+        fi
+
+        if [ -z "{{.BINARY}}" ]; then
+            BASENAME=$(basename "{{.REPO}}")
+        else
+            BASENAME="{{.BINARY}}"
+        fi
+
+        if [ -z "{{.SKIP_CHECK}}" ]; then
+          if ! command -v $BASENAME > /dev/null; then
+            if [ "$DEBUG" != "false" ]; then
+              echo "No $BASENAME found, downloading"
+            fi
+          else
+              exit 0
+          fi
+        fi
+
+        OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+        ARCH=$(uname -m)
+        case $ARCH in
+          x86_64)
+            if [ "{{.PREFER_X86}}" = "true" ]; then
+              ARCH="x86_64"
+            else
+              ARCH="amd64"
+            fi
+            ;;
+          aarch64) ARCH="arm64" ;;
+          *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+        esac
+
+        # Determine whether to use curl or wget
+        DOWNLOAD_CMD=""
+        if command -v curl > /dev/null; then
+            DOWNLOAD_CMD="curl -s -L -o"
+        elif command -v wget > /dev/null; then
+            DOWNLOAD_CMD="wget -O"
+        else
+          if [ "$DEBUG" != "false" ]; then
+            echo "Neither curl nor wget is available, please install one and retry."
+          fi
+            exit 1
+        fi
+
+        # Fetch the release information
+        if [ "{{.TAG}}" = "latest" ]; then
+            TAG=$(curl -s "https://api.github.com/repos/{{.REPO}}/releases/latest" | grep "tag_name" | cut -d '"' -f 4)
+        else
+            TAG="{{.TAG}}"
+        fi
+
+        RELEASE_INFO=$(curl -s "https://api.github.com/repos/{{.REPO}}/releases/tags/$TAG")
+        URL=$(echo $RELEASE_INFO | grep -o '"browser_download_url": *"[^"]*"' | grep -E "${OS}_${ARCH}\.(tar\.gz|gz|zip)" | cut -d '"' -f 4)
+
+        if [ -z "$URL" ]; then
+          URL=$(echo $RELEASE_INFO | grep -o '"browser_download_url": *"[^"]*"' | grep -E "${OS}_${ARCH}" | cut -d '"' -f 4)
+        fi
+
+        # Check if a URL was found
+        if [ -z "$URL" ]; then
+            echo "Failed to find a release for tag '$TAG' with filename '$FILENAME'."
+            exit 1
+        fi
+
+        if [[ "$URL" =~ \.tar.gz$ ]]; then
+          FILETYPE="tar.gz"
+        elif [[ "$URL" =~ \.zip$ ]]; then
+          FILETYPE="zip"
+        elif [[ "$URL" =~ \.gz$ ]]; then
+          FILETYPE="gz"
+        else
+          FILETYPE="binary"
+        fi
+
+        # Construct the download URL and filename
+        if [ "$FILETYPE" = "binary" ]; then
+          FILENAME="${BASENAME}_${TAG}_${OS}_${ARCH}"
+        else
+          FILENAME="${BASENAME}_${TAG}_${OS}_${ARCH}.${FILETYPE}"
+        fi
+
+        # Download and extract the tar.gz file
+        if [ "$DEBUG" != "false" ]; then
+          echo "Downloading $FILENAME from $URL"
+        fi
+        $DOWNLOAD_CMD $FILENAME $URL
+
+        # Extract the binary
+        if [ "$DEBUG" != "false" ]; then
+          echo "Extracting $BASENAME to $EXTRACT_PATH"
+        fi
+
+        if [ "$FILETYPE" = "tar.gz" ]; then
+          tar -xzf $FILENAME -C . $BASENAME
+        elif [ "$FILETYPE" = "zip" ]; then
+          unzip -o $FILENAME -d . $BASENAME
+        elif [ "$FILETYPE" = "gz" ]; then
+          gunzip -c $FILENAME > $BASENAME
+        elif [ "$FILETYPE" = "binary" ]; then
+          mv $FILENAME $BASENAME
+        else
+          echo "Unsupported filetype: $FILETYPE"
+          exit 1
+        fi
+
+        # Make the binary executable
+        chmod +x $BASENAME
+
+        # Move the binary to the desired location
+        if [ "{{.CI}}" = "true" ] || [ -w $EXTRACT_PATH ] || ! command -v sudo > /dev/null; then
+          mv $BASENAME $EXTRACT_PATH/$BASENAME
+        else
+          sudo mv $BASENAME $EXTRACT_PATH/$BASENAME
+        fi
+
+        # Cleanup the downloaded tar.gz file if it exists
+        if [ -f $FILENAME ]; then
+          rm $FILENAME
+        fi
+
+
+  install:
+    desc: Install development tools
+    cmds:
+      - task: download-binary
+        vars:
+          REPO: git-chglog/git-chglog
+          TAG: latest
+          BINARY: git-chglog
+      - task: download-binary
+        vars:
+          REPO: caarlos0/svu
+          TAG: v2.2.0
+          BINARY: svu

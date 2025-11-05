@@ -1,0 +1,80 @@
+name: release
+
+on:
+  push:
+    tags: ["*"]
+
+jobs:
+  make-release:
+    if: |
+      !contains(github.event.head_commit.message, '[skip-ci]') &&
+      github.repository == 'wizrds/jobq-rs'
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: "3.43.3"
+
+      - name: Extract changelog for release
+        id: changelog
+        run: |
+          TAG=$(task version:current)
+          PREV_VERSION=$(grep -E '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | head -n 2 | tail -n 1 | sed -E 's/^## \[([^]]+)\].*/\1/')
+          
+          awk -v tag="$TAG" -v prev="$PREV_VERSION" '
+            # When we hit the tag anchor, start looking but skip the next header line
+            $0 ~ ("^<a name=\"" tag "\"") { printing=0; seen_tag=1; next }
+
+            # Skip the header line itself once after the tag
+            seen_tag && $0 ~ ("^## \\[" tag "\\]") { printing=1; next }
+
+            # Stop printing once we reach the previous version
+            $0 ~ ("^<a name=\"" prev "\"") { exit }
+            $0 ~ ("^## \\[" prev "\\]") { exit }
+
+            # Print content only when inside the tag section
+            printing
+          ' CHANGELOG.md > release_notes.md
+          
+          echo "Release notes for $TAG:"
+          cat release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          body_path: release_notes.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # publish-crates:
+  #   if: |
+  #     !contains(github.event.head_commit.message, '[skip-ci]') &&
+  #     github.repository == 'wizrds/jobq-rs'
+  #   name: Publish to crates.io
+  #   runs-on: ubuntu-latest
+  #   needs: make-release
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v5
+
+  #     - name: Set up Rust
+  #       uses: actions-rust-lang/setup-rust-toolchain@v1
+
+  #     - name: Publish to crates.io
+  #       run: |
+  #         CRATES=("jobq" "jobq-core")
+
+  #         for crate in "${CRATES[@]}"; do
+  #           echo "Publishing $crate..."
+  #           cargo publish --manifest-path "$crate/Cargo.toml" --token "${{ secrets.CRATESIO_TOKEN }}" --allow-dirty --no-verify
+  #         done

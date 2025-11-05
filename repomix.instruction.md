@@ -1,0 +1,5 @@
+- Strictly follow the SOLID principles, with a focus on SRP and DRY.
+- Suggest splitting files into smaller, focused units when appropriate.
+- Ensure documentation best practices with line comments and docstrings.
+- Follow the reST format for docstrings.
+- Use type hints for all function arguments and return values.

@@ -1,0 +1,19 @@
+{
+    "name": "jobq-rs",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "context": "..",
+		"args": {
+			"VARIANT": "1.85.0-bookworm"
+		}
+    },
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"rust-lang.rust-analyzer"
+			]
+		}
+	},
+	"postCreateCommand": "pre-commit install --install-hooks",
+	"remoteUser": "dev"
+}

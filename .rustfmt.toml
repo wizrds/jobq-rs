@@ -1,0 +1,4 @@
+fn_call_width = 80
+struct_lit_width = 40
+combine_control_expr = false
+chain_width = 40

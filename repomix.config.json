@@ -1,0 +1,25 @@
+{
+  "output": {
+    "filePath": "repomix.output.md",
+    "style": "markdown",
+    "instructionFilePath": "repomix.instruction.md",
+    "removeComments": false,
+    "removeEmptyLines": false,
+    "topFilesLength": 5,
+    "showLineNumbers": false,
+    "copyToClipboard": false
+  },
+  "include": [
+    "jobq/**/*.rs",
+    "jobq-macros/**/*.rs",
+    "jobq-core/**/*.rs"
+  ],
+  "ignore": {
+    "useGitignore": true,
+    "useDefaultPatterns": true,
+    "customPatterns": []
+  },
+  "security": {
+    "enableSecurityCheck": true
+  }
+}

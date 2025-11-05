@@ -1,0 +1,7 @@
+repos:
+    # Gitlint requires python 3.11 per this issue:
+    # https://github.com/jorisroovers/gitlint/issues/544
+  - repo: https://github.com/jorisroovers/gitlint
+    rev: "v0.19.1"
+    hooks:
+      - id: gitlint
