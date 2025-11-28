@@ -59,14 +59,14 @@ impl Task for MyTask {
 ### Creating a JobQueue and enqueueing a Job
 
 ```rust
-use jobq::{JobQueueBuilderSystemBuilder, Task, JobOptions};
+use jobq::{JobQueueSystemBuilder, Task, JobOptions};
 
 
 #[tokio::main]
 async fn main() {
     // Create a JobQueue with a FIFO queue implementation with a max capacity of 10 and a WorkerPool to process jobs,
     // with 2 workers.
-    let (job_queue, worker_pool) = JobQueueBuilderSystemBuilder::<MyTask, _>::fifo(10)
+    let (job_queue, worker_pool) = JobQueueSystemBuilder::<MyTask, _>::fifo(10)
         .with_num_workers(2)
         .build();
 
