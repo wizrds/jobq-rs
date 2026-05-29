@@ -1,4 +1,5 @@
-use std::{sync::Arc, marker::PhantomData};
+use std::{sync::Arc, marker::PhantomData, panic::AssertUnwindSafe, any::Any};
+use futures::future::FutureExt;
 
 use crate::{
     task::Task,
@@ -134,16 +135,24 @@ where
         while self.retries < self.max_retries && result.is_none() {
             self.retries += 1;
 
-            match self.task.execute().await {
-                Ok(output) => {
+            match AssertUnwindSafe(self.task.execute())
+                .catch_unwind()
+                .await
+            {
+                Ok(Ok(output)) => {
                     result = Some(Ok(output));
                     self.status = JobStatus::Completed;
                 },
-                Err(e) if self.retries >= self.max_retries => {
+                Ok(Err(e)) if self.retries >= self.max_retries => {
                     result = Some(Err(Error::TaskExecution(e.to_string())));
                     self.status = JobStatus::Failed;
                 },
-                Err(_) => continue,
+                Ok(Err(_)) => continue,
+                // A panic fails the job immediately, regardless of remaining retries.
+                Err(panic) => {
+                    result = Some(Err(Error::TaskPanic(panic_message(panic))));
+                    self.status = JobStatus::Failed;
+                },
             }
         }
 
@@ -151,6 +160,18 @@ where
             self.future_setter
                 .set_result(res);
         }
+    }
+}
+
+
+/// Extracts a human-readable message from a caught panic payload.
+fn panic_message(panic: Box<dyn Any + Send>) -> String {
+    if let Some(s) = panic.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = panic.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
     }
 }
 
@@ -228,6 +249,12 @@ where
     pub async fn len(&self) -> usize {
         self.inner.len()
             .await
+    }
+
+    /// Returns `true` if the queue currently contains no [`Job`](crate::job::Job)s.
+    pub async fn is_empty(&self) -> bool {
+        self.len()
+            .await == 0
     }
 
     /// Closes the [`JobQueue`](crate::job::JobQueue), preventing any further [`Job`](crate::job::Job)s from being enqueued.
@@ -311,6 +338,16 @@ where
     }
 }
 
+impl<T, Q> Default for JobQueueBuilder<T, Q>
+where
+    T: Task + 'static,
+    Q: Queue<Item = Job<T>> + 'static,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T, Q> JobQueueBuilder<T, Q>
 where
     T: Task + 'static,
@@ -330,5 +367,67 @@ where
     /// A [`JobQueue`](crate::job::JobQueue) instance with the configured queue.
     pub fn build(self) -> Arc<JobQueue<T, Q>> {
         Arc::new(JobQueue::new(self.queue.expect("Queue must be set before building")))
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::task::Task;
+
+    struct PanicTask {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Task for PanicTask {
+        type Output = u32;
+        type Error = String;
+
+        async fn execute(&self) -> std::result::Result<Self::Output, Self::Error> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            panic!("boom");
+        }
+    }
+
+    struct DoubleTask {
+        n: u32,
+    }
+
+    #[async_trait::async_trait]
+    impl Task for DoubleTask {
+        type Output = u32;
+        type Error = String;
+
+        async fn execute(&self) -> std::result::Result<Self::Output, Self::Error> {
+            Ok(self.n * 2)
+        }
+    }
+
+    #[tokio::test]
+    async fn panic_in_task_is_contained_and_fails_fast() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (mut job, future) = Job::new(
+            PanicTask { calls: calls.clone() },
+            3,
+        );
+
+        job.execute().await;
+
+        assert_eq!(job.status(), JobStatus::Failed);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(future.result().await, Err(Error::TaskPanic(_))));
+    }
+
+    #[tokio::test]
+    async fn healthy_task_still_completes() {
+        let (mut job, future) = Job::new(DoubleTask { n: 21 }, 1);
+
+        job.execute().await;
+
+        assert_eq!(job.status(), JobStatus::Completed);
+        assert_eq!(future.result().await.unwrap(), 42);
     }
 }

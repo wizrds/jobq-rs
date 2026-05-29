@@ -13,6 +13,8 @@ pub enum Error {
     JobTimeout,
     #[error("task execution error: {0}")]
     TaskExecution(String),
+    #[error("task panicked: {0}")]
+    TaskPanic(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

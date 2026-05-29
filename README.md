@@ -56,6 +56,8 @@ impl Task for MyTask {
 }
 ```
 
+If a task's `execute` method panics, the panic is caught and surfaced as a failed job result (`Error::TaskPanic`) rather than taking down the worker. A panic fails the job immediately and is never retried. Note that tasks should avoid panicking while holding shared invariants (for example, data behind interior mutability shared with other tasks), since the catch boundary cannot guarantee such state is left in a consistent state.
+
 ### Creating a JobQueue and enqueueing a Job
 
 ```rust

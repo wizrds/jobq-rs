@@ -32,6 +32,12 @@ pub trait Queue: Send + Sync {
     /// Returns the number of items currently in the queue.
     async fn len(&self) -> usize;
 
+    /// Returns `true` if the queue currently contains no items.
+    async fn is_empty(&self) -> bool {
+        self.len()
+            .await == 0
+    }
+
     /// Closes the queue, preventing any further items from being enqueued.
     /// 
     /// # Returns

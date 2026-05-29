@@ -14,9 +14,11 @@ members = [
 ]
 
 [workspace.dependencies]
-async-trait = { version = "0.1.89" }
-futures = { version = "0.3.31" }
-futures-timeout = { version = "0.1.3" }
+async-trait = { version = "0.1" }
+futures = { version = "0.3" }
+futures-timeout = { version = "0.1" }
+
 thiserror = { version = "2.0" }
 anyhow = { version = "1.0" }
-mea = { version = "0.5" }
+
+mea = { version = "0.6" }

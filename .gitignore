@@ -33,4 +33,5 @@ certs/
 # Testing scripts
 scripts/
 
-repomix.output.md
+# Agent tasks
+.agent

@@ -316,6 +316,17 @@ where
     __marker: PhantomData<(T, Q, W)>,
 }
 
+impl<T, Q, W> Default for WorkerPoolBuilder<T, Q, W>
+where
+    T: Task + 'static,
+    Q: Queue<Item = Job<T>> + 'static,
+    W: Worker<T, Q> + 'static,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T, Q, W> WorkerPoolBuilder<T, Q, W>
 where
     T: Task + 'static,

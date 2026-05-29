@@ -8,6 +8,10 @@ use crate::{
 };
 
 
+/// A built job queue system: the [`JobQueue`](crate::job::JobQueue) paired with its [`WorkerPool`](crate::worker::WorkerPool).
+pub type QueueSystem<T, Q, W> = (Arc<JobQueue<T, Q>>, Arc<WorkerPool<T, Q, W>>);
+
+
 /// A builder for creating a complete job queue system.
 pub struct QueueSystemBuilder<T, Q, W>
 where
@@ -103,7 +107,7 @@ where
     /// 
     /// # Returns
     /// A tuple containing the job queue and the worker pool.
-    pub fn build(self) -> (Arc<JobQueue<T, Q>>, Arc<WorkerPool<T, Q, W>>) {
+    pub fn build(self) -> QueueSystem<T, Q, W> {
         let job_queue = self.job_queue_builder
             .build();
         let worker_pool = self.worker_pool_builder

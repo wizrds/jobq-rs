@@ -92,7 +92,7 @@ where
         let idx = self.idx_counter.fetch_add(1, AtomicOrdering::SeqCst);
 
         let mut guard = self.heap.lock().await;
-        guard.push(PriorityItem { item, priority: priority as u32, idx });
+        guard.push(PriorityItem { item, priority, idx });
         drop(guard);
         
         self.length.fetch_add(1, AtomicOrdering::SeqCst);
@@ -237,8 +237,8 @@ mod tests {
         // Should get all unique items from "item0" to "item9"
         items.sort();
         assert_eq!(items.len(), 10);
-        for i in 0..10 {
-            assert_eq!(items[i], format!("item{}", i));
+        for (i, item) in items.iter().enumerate() {
+            assert_eq!(*item, format!("item{}", i));
         }
     }
 
