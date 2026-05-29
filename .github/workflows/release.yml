@@ -30,18 +30,13 @@ jobs:
           TAG=$(task version:current)
           PREV_VERSION=$(grep -E '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | head -n 2 | tail -n 1 | sed -E 's/^## \[([^]]+)\].*/\1/')
           
-          awk -v tag="$TAG" -v prev="$PREV_VERSION" '
-            # When we hit the tag anchor, start looking but skip the next header line
-            $0 ~ ("^<a name=\"" tag "\"") { printing=0; seen_tag=1; next }
+          awk -v tag="$TAG" '
+            # Start when we hit the current version header
+            $0 ~ "^## \\[" tag "\\]" { printing=1; next }
 
-            # Skip the header line itself once after the tag
-            seen_tag && $0 ~ ("^## \\[" tag "\\]") { printing=1; next }
+            # Stop when we hit the next version header
+            printing && $0 ~ "^## \\[" { exit }
 
-            # Stop printing once we reach the previous version
-            $0 ~ ("^<a name=\"" prev "\"") { exit }
-            $0 ~ ("^## \\[" prev "\\]") { exit }
-
-            # Print content only when inside the tag section
             printing
           ' CHANGELOG.md > release_notes.md
           
@@ -55,26 +50,3 @@ jobs:
           body_path: release_notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # publish-crates:
-  #   if: |
-  #     !contains(github.event.head_commit.message, '[skip-ci]') &&
-  #     github.repository == 'wizrds/jobq-rs'
-  #   name: Publish to crates.io
-  #   runs-on: ubuntu-latest
-  #   needs: make-release
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v5
-
-  #     - name: Set up Rust
-  #       uses: actions-rust-lang/setup-rust-toolchain@v1
-
-  #     - name: Publish to crates.io
-  #       run: |
-  #         CRATES=("jobq" "jobq-core")
-
-  #         for crate in "${CRATES[@]}"; do
-  #           echo "Publishing $crate..."
-  #           cargo publish --manifest-path "$crate/Cargo.toml" --token "${{ secrets.CRATESIO_TOKEN }}" --allow-dirty --no-verify
-  #         done

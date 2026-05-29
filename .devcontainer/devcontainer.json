@@ -4,7 +4,7 @@
         "dockerfile": "Dockerfile",
         "context": "..",
 		"args": {
-			"VARIANT": "1.85.0-bookworm"
+			"VARIANT": "1.94.0-bookworm"
 		}
     },
 	"customizations": {
@@ -14,6 +14,6 @@
 			]
 		}
 	},
-	"postCreateCommand": "pre-commit install --install-hooks",
+	"postCreateCommand": "prek install --install-hooks",
 	"remoteUser": "dev"
 }

@@ -23,7 +23,7 @@ jobs:
       - name: Install Task
         uses: arduino/setup-task@v2
         with:
-          version: "3.43.3"
+          version: 3.43.3
 
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
