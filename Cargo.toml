@@ -9,8 +9,8 @@ readme = "README.md"
 [workspace]
 resolver = "2"
 members = [
-    "jobq-core",
-    "jobq",
+    "crates/jobq-core",
+    "crates/jobq",
 ]
 
 [workspace.dependencies]

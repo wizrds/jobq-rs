@@ -32,11 +32,11 @@ body = """
 {% endfor %}\n
 
 {%- macro commit_url(commit_id) -%}
-    $REPO/-/commit/{{ commit_id }}
+    $REPO/commit/{{ commit_id }}
 {%- endmacro -%}
 
 {%- macro compare_url(previous_version, version) -%}
-    $REPO/-/compare/{{ previous_version }}...{{ version }}
+    $REPO/compare/{{ previous_version }}..{{ version }}
 {%- endmacro -%}
 """
 footer = """"""
