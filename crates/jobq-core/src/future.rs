@@ -1,9 +1,19 @@
-use std::{sync::{Arc, atomic::{AtomicBool, Ordering}}, future::IntoFuture, ops::{Deref, DerefMut}, iter::FromIterator};
-use futures::{channel::oneshot::{Sender, Receiver, channel}, future::{BoxFuture, join_all, try_join_all}};
+use futures::{
+    channel::oneshot::{Receiver, Sender, channel},
+    future::{BoxFuture, join_all, try_join_all},
+};
 use mea::mutex::Mutex;
+use std::{
+    future::IntoFuture,
+    iter::FromIterator,
+    ops::{Deref, DerefMut},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use crate::error::{Error, Result};
-
 
 /// Represents a future that can be awaited to get the result of a [`Job`](crate::job::Job).
 pub struct JobFuture<T>
@@ -14,11 +24,11 @@ where
 }
 
 impl<T> JobFuture<T>
-where 
+where
     T: Send + Sync,
 {
     /// Creates a new [`JobFuture`](crate::future::JobFuture) instance with a channel for receiving the job's result.
-    /// 
+    ///
     /// # Returns
     /// A tuple containing the [`JobFuture`](crate::future::JobFuture) instance and a [`JobFutureSetter`](crate::future::JobFutureSetter)
     /// that can be used to set the result of the job.
@@ -32,14 +42,14 @@ where
                     result: None,
                     receiver: Some(receiver),
                     closed: AtomicBool::new(false),
-                }))
+                })),
             },
-            setter
+            setter,
         )
     }
 
     /// Awaits the result of the [`JobFuture`](crate::future::JobFuture).
-    /// 
+    ///
     /// # Returns
     /// A `Result` containing the [`Job`](crate::job::Job)'s output if successful, or an error if the task failed or the future was closed.
     pub async fn result(&self) -> Result<T> {
@@ -65,24 +75,23 @@ where
     /// Closes the future, preventing any further awaits on it.
     pub async fn close(&self) {
         let mut inner = self.inner.lock().await;
-        inner.closed.store(true, Ordering::SeqCst);
+        inner
+            .closed
+            .store(true, Ordering::SeqCst);
         inner.receiver.take(); // Drop the receiver to prevent further awaits
         inner.result.take(); // Clear any existing result
     }
 }
 
-
 impl<T> IntoFuture for JobFuture<T>
-where 
+where
     T: Send + Sync + 'static,
 {
     type Output = Result<T>;
     type IntoFuture = BoxFuture<'static, Result<T>>;
 
     fn into_future(self) -> Self::IntoFuture {
-        Box::pin(async move {
-            self.result().await
-        })
+        Box::pin(async move { self.result().await })
     }
 }
 
@@ -95,7 +104,6 @@ where
     closed: AtomicBool,
 }
 
-
 /// A setter for the [`JobFuture`](crate::future::JobFuture) that allows setting the result
 /// of the [`Job`](crate::job::Job) associated with the future.
 #[derive(Debug)]
@@ -107,11 +115,11 @@ where
 }
 
 impl<T> JobFutureSetter<T>
-where 
+where
     T: Send + Sync,
 {
     /// Sets the result of the [`JobFuture`](crate::future::JobFuture), sending it through the channel.
-    /// 
+    ///
     /// # Arguments
     /// * `result` - The result of the [`Job`](crate::job::Job) to be sent.
     pub fn set_result(&mut self, result: Result<T>) {
@@ -130,14 +138,14 @@ where
 }
 
 impl<T> JobFutureSet<T>
-where 
+where
     T: Send + Sync + 'static,
 {
     /// Creates a new [`JobFutureSet`](crate::future::JobFutureSet) with the given futures.
-    /// 
+    ///
     /// # Arguments
     /// * `futures` - A vector of [`JobFuture`](crate::future::JobFuture) instances to include in the set.
-    /// 
+    ///
     /// # Returns
     /// A new instance of [`JobFutureSet`](crate::future::JobFutureSet).
     pub fn new(futures: Vec<JobFuture<T>>) -> Self {
@@ -149,7 +157,7 @@ where
         join_all(
             self.futures
                 .into_iter()
-                .map(|fut| fut.into_future())
+                .map(|fut| fut.into_future()),
         )
         .await
     }
@@ -159,39 +167,35 @@ where
         try_join_all(
             self.futures
                 .into_iter()
-                .map(|fut| fut.into_future())
+                .map(|fut| fut.into_future()),
         )
         .await
     }
 }
 
 impl<T> IntoFuture for JobFutureSet<T>
-where 
+where
     T: Send + Sync + 'static,
 {
     type Output = Vec<Result<T>>;
     type IntoFuture = BoxFuture<'static, Vec<Result<T>>>;
 
     fn into_future(self) -> Self::IntoFuture {
-        Box::pin(async move {
-            self.join_all().await
-        })
+        Box::pin(async move { self.join_all().await })
     }
 }
 
 impl<T> FromIterator<JobFuture<T>> for JobFutureSet<T>
-where 
+where
     T: Send + Sync + 'static,
 {
     fn from_iter<I: IntoIterator<Item = JobFuture<T>>>(iter: I) -> Self {
-        Self {
-            futures: iter.into_iter().collect(),
-        }
+        Self { futures: iter.into_iter().collect() }
     }
 }
 
 impl<T> IntoIterator for JobFutureSet<T>
-where 
+where
     T: Send + Sync + 'static,
 {
     type Item = JobFuture<T>;
@@ -203,7 +207,7 @@ where
 }
 
 impl<T> Deref for JobFutureSet<T>
-where 
+where
     T: Send + Sync + 'static,
 {
     type Target = Vec<JobFuture<T>>;
@@ -214,7 +218,7 @@ where
 }
 
 impl<T> DerefMut for JobFutureSet<T>
-where 
+where
     T: Send + Sync + 'static,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
@@ -223,7 +227,7 @@ where
 }
 
 impl<T> From<Vec<JobFuture<T>>> for JobFutureSet<T>
-where 
+where
     T: Send + Sync + 'static,
 {
     fn from(futures: Vec<JobFuture<T>>) -> Self {

@@ -1,18 +1,17 @@
-use std::{sync::Arc, marker::PhantomData, panic::AssertUnwindSafe, any::Any};
 use futures::future::FutureExt;
+use std::{any::Any, marker::PhantomData, panic::AssertUnwindSafe, sync::Arc};
 
 use crate::{
-    task::Task,
-    future::{JobFuture, JobFutureSetter},
     error::{Error, Result},
-    queue::{traits::Queue, fifo::FifoQueue, lifo::LifoQueue, priority::PriorityQueue},
+    future::{JobFuture, JobFutureSetter},
+    queue::{fifo::FifoQueue, lifo::LifoQueue, priority::PriorityQueue, traits::Queue},
+    task::Task,
 };
-
 
 /// Options for configuring a job in the job queue.
 #[derive(Debug, Clone)]
 pub struct JobOptions<T, Q>
-where 
+where
     T: Task,
     Q: Queue<Item = Job<T>>,
 {
@@ -22,15 +21,15 @@ where
 }
 
 impl<T, Q> JobOptions<T, Q>
-where 
+where
     T: Task,
     Q: Queue<Item = Job<T>>,
 {
     /// Creates a new [`JobOptions`](crate::job::JobOptions) instance with the specified task.
-    /// 
+    ///
     /// # Arguments
     /// * `task` - The task to be executed by the job.
-    /// 
+    ///
     /// # Returns
     /// A new [`JobOptions`](crate::job::JobOptions) instance with the specified task and default
     /// values for max retries and queue options.
@@ -43,10 +42,10 @@ where
     }
 
     /// Sets the maximum number of retries for the job.
-    /// 
+    ///
     /// # Arguments
     /// * `retries` - The maximum number of retries for the job.
-    /// 
+    ///
     /// # Returns
     /// The updated [`JobOptions`](crate::job::JobOptions) instance with the specified maximum retries.
     pub fn with_max_retries(mut self, retries: usize) -> Self {
@@ -55,10 +54,10 @@ where
     }
 
     /// Sets the queue options for the job.
-    /// 
+    ///
     /// # Arguments
     /// * `options` - The queue options to be used for the job.
-    /// 
+    ///
     /// # Returns
     /// The updated [`JobOptions`](crate::job::JobOptions) instance with the specified queue options.
     pub fn with_queue_options(mut self, options: Q::Options) -> Self {
@@ -72,7 +71,6 @@ where
     }
 }
 
-
 /// Represents the status of a [`Job`](crate::job::Job) in the [`JobQueue`](crate::job::JobQueue).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobStatus {
@@ -82,11 +80,10 @@ pub enum JobStatus {
     Failed,
 }
 
-
 /// Represents a job that can be executed in the [`JobQueue`](crate::job::JobQueue).
 #[derive(Debug)]
 pub struct Job<T>
-where 
+where
     T: Task,
 {
     task: T,
@@ -96,30 +93,32 @@ where
     future_setter: JobFutureSetter<T::Output>,
 }
 
-
 impl<T> Job<T>
-where 
+where
     T: Task,
 {
     /// Creates a new [`Job`](crate::job::Job) instance with the specified task and maximum retries.
-    /// 
+    ///
     /// # Arguments
     /// * `task` - The task to be executed by the job.
     /// * `max_retries` - The maximum number of retries for the job.
-    /// 
+    ///
     /// # Returns
     /// A tuple containing the [`Job`](crate::job::Job) instance and a [`JobFuture`](crate::future::JobFuture) that
     /// can be awaited for the job's result.
     pub fn new(task: T, max_retries: usize) -> (Self, JobFuture<T::Output>) {
         let (future, setter) = JobFuture::new();
 
-        (Self {
-            task,
-            max_retries,
-            retries: 0,
-            status: JobStatus::Pending,
-            future_setter: setter,
-        }, future)
+        (
+            Self {
+                task,
+                max_retries,
+                retries: 0,
+                status: JobStatus::Pending,
+                future_setter: setter,
+            },
+            future,
+        )
     }
 
     /// Returns the task associated with the job.
@@ -142,27 +141,25 @@ where
                 Ok(Ok(output)) => {
                     result = Some(Ok(output));
                     self.status = JobStatus::Completed;
-                },
+                }
                 Ok(Err(e)) if self.retries >= self.max_retries => {
                     result = Some(Err(Error::TaskExecution(e.to_string())));
                     self.status = JobStatus::Failed;
-                },
+                }
                 Ok(Err(_)) => continue,
                 // A panic fails the job immediately, regardless of remaining retries.
                 Err(panic) => {
                     result = Some(Err(Error::TaskPanic(panic_message(panic))));
                     self.status = JobStatus::Failed;
-                },
+                }
             }
         }
 
         if let Some(res) = result {
-            self.future_setter
-                .set_result(res);
+            self.future_setter.set_result(res);
         }
     }
 }
-
 
 /// Extracts a human-readable message from a caught panic payload.
 fn panic_message(panic: Box<dyn Any + Send>) -> String {
@@ -174,7 +171,6 @@ fn panic_message(panic: Box<dyn Any + Send>) -> String {
         "unknown panic".to_string()
     }
 }
-
 
 /// Represents a job queue that manages jobs with the task of type `T` using a queue of type `Q`.
 #[derive(Debug)]
@@ -192,10 +188,10 @@ where
     Q: Queue<Item = Job<T>>,
 {
     /// Creates a new [`JobQueue`](crate::job::JobQueue) instance with the specified queue.
-    /// 
+    ///
     /// # Arguments
     /// * `queue` - The queue to be used for managing jobs.
-    /// 
+    ///
     /// # Returns
     /// A new [`JobQueue`](crate::job::JobQueue) instance with the specified queue.
     pub fn new(queue: Q) -> Self {
@@ -204,10 +200,10 @@ where
 
     /// Enqueues a [`Job`](crate::job::Job) with the specified options and returns a [`JobFuture`](crate::future::JobFuture)
     /// that can be awaited for the job's result.
-    /// 
+    ///
     /// # Arguments
     /// * `options` - The options for the job, including the task, maximum retries
-    /// 
+    ///
     /// # Returns
     /// A `Result` containing a [`JobFuture`](crate::future::JobFuture) that can be awaited for the
     /// [`Job`](crate::job::Job)'s result, or an error if the job could not be enqueued.
@@ -219,50 +215,51 @@ where
     }
 
     /// Enqueues a [`Job`](crate::job::Job) with optional queue options.
-    /// 
+    ///
     /// # Arguments
     /// * `job` - The job to be enqueued.
     /// * `options` - Optional queue options for the job.
-    /// 
+    ///
     /// # Returns
     /// A `Result` indicating success or failure of the enqueue operation.
     pub async fn enqueue(&self, job: Job<T>, options: Option<Q::Options>) -> Result<()> {
-        self.inner.enqueue(job, options)
+        self.inner
+            .enqueue(job, options)
             .await
             .map_err(Error::from)
     }
 
     /// Dequeues a [`Job`](crate::job::Job) from the queue.
-    /// 
+    ///
     /// # Returns
     /// A `Result` containing an `Option<Job<T>>`, which is `Some` if a job was successfully dequeued, or `None` if the queue is closed.
     pub async fn dequeue_job(&self) -> Result<Option<Job<T>>> {
-        self.inner.dequeue()
+        self.inner
+            .dequeue()
             .await
             .map_err(Error::from)
     }
 
     /// Returns the number of [`Job`](crate::job::Job)s currently in the queue.
-    /// 
+    ///
     /// # Returns
     /// A `Result` containing the number of jobs in the queue.
     pub async fn len(&self) -> usize {
-        self.inner.len()
-            .await
+        self.inner.len().await
     }
 
     /// Returns `true` if the queue currently contains no [`Job`](crate::job::Job)s.
     pub async fn is_empty(&self) -> bool {
-        self.len()
-            .await == 0
+        self.len().await == 0
     }
 
     /// Closes the [`JobQueue`](crate::job::JobQueue), preventing any further [`Job`](crate::job::Job)s from being enqueued.
-    /// 
+    ///
     /// # Returns
     /// A `Result` indicating success or failure of the close operation.
     pub async fn close(&self) -> Result<()> {
-        self.inner.close()
+        self.inner
+            .close()
             .await
             .map_err(Error::from)
     }
@@ -272,7 +269,6 @@ where
         JobQueueBuilder::new()
     }
 }
-
 
 /// A builder for creating a [`JobQueue`](crate::job::JobQueue).
 pub struct JobQueueBuilder<T, Q>
@@ -288,12 +284,12 @@ impl<T> JobQueueBuilder<T, FifoQueue<Job<T>>>
 where
     T: Task,
 {
-    /// Creates a [`JobQueueBuilder`](crate::job::JobQueueBuilder) instance with a [`FIFOQueue`](crate::queue::fifo::FifoQueue) 
+    /// Creates a [`JobQueueBuilder`](crate::job::JobQueueBuilder) instance with a [`FIFOQueue`](crate::queue::fifo::FifoQueue)
     /// and the specified maximum capacity.
-    /// 
+    ///
     /// # Arguments
     /// * `max_capacity` - The maximum capacity of the FIFO queue.
-    /// 
+    ///
     /// # Returns
     /// A [`JobQueueBuilder`](crate::job::JobQueueBuilder) instance.
     pub fn fifo(mut self, max_capacity: usize) -> Self {
@@ -308,10 +304,10 @@ where
 {
     /// Creates a [`JobQueueBuilder`](crate::job::JobQueueBuilder) instance with a [`LIFOQueue`](crate::queue::lifo::LifoQueue)
     /// and the specified maximum capacity.
-    /// 
+    ///
     /// # Arguments
     /// * `max_capacity` - The maximum capacity of the LIFO queue.
-    /// 
+    ///
     /// # Returns
     /// A [`JobQueueBuilder`](crate::job::JobQueueBuilder) instance.
     pub fn lifo(mut self, max_capacity: usize) -> Self {
@@ -326,10 +322,10 @@ where
 {
     /// Creates a [`JobQueueBuilder`](crate::job::JobQueueBuilder) instance with a [`PriorityQueue`](crate::queue::priority::PriorityQueue)
     /// and the specified maximum capacity.
-    /// 
+    ///
     /// # Arguments
     /// * `max_capacity` - The maximum capacity of the priority queue.
-    /// 
+    ///
     /// # Returns
     /// A [`JobQueueBuilder`](crate::job::JobQueueBuilder) instance.
     pub fn priority(mut self, max_capacity: usize) -> Self {
@@ -355,27 +351,26 @@ where
 {
     /// Creates a new [`JobQueueBuilder`](crate::job::JobQueueBuilder) instance.
     pub fn new() -> Self {
-        Self {
-            queue: None,
-            __marker: PhantomData,
-        }
+        Self { queue: None, __marker: PhantomData }
     }
 
     /// Builds a [`JobQueue`](crate::job::JobQueue) using the configured queue.
-    /// 
+    ///
     /// # Returns
     /// A [`JobQueue`](crate::job::JobQueue) instance with the configured queue.
     pub fn build(self) -> Arc<JobQueue<T, Q>> {
-        Arc::new(JobQueue::new(self.queue.expect("Queue must be set before building")))
+        Arc::new(JobQueue::new(
+            self.queue
+                .expect("Queue must be set before building"),
+        ))
     }
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use crate::task::Task;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct PanicTask {
         calls: Arc<AtomicUsize>,
@@ -387,7 +382,8 @@ mod tests {
         type Error = String;
 
         async fn execute(&self) -> std::result::Result<Self::Output, Self::Error> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.calls
+                .fetch_add(1, Ordering::SeqCst);
             panic!("boom");
         }
     }
@@ -409,10 +405,7 @@ mod tests {
     #[tokio::test]
     async fn panic_in_task_is_contained_and_fails_fast() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let (mut job, future) = Job::new(
-            PanicTask { calls: calls.clone() },
-            3,
-        );
+        let (mut job, future) = Job::new(PanicTask { calls: calls.clone() }, 3);
 
         job.execute().await;
 

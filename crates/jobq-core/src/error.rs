@@ -1,13 +1,12 @@
 use thiserror::Error;
 
-use crate::queue::error::{Error as QueueError};
-
+use crate::queue::error::Error as QueueError;
 
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("queue error: {0}")]
     Queue(#[from] QueueError),
-    #[error("future closeD")]
+    #[error("future closed")]
     FutureClosed,
     #[error("job timeout")]
     JobTimeout,

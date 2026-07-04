@@ -1,16 +1,21 @@
-use std::sync::{Arc, atomic::{AtomicUsize, AtomicBool, Ordering}};
 use async_trait::async_trait;
-use futures::channel::mpsc::{channel, Sender, Receiver};
+use futures::channel::mpsc::{Receiver, Sender, channel};
 use futures::{SinkExt, StreamExt};
 use mea::mutex::Mutex;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
-use crate::queue::{traits::Queue, error::{Error, Result}};
-
+use crate::queue::{
+    error::{Error, Result},
+    traits::Queue,
+};
 
 /// A First In First Out (FIFO) queue implementation.
 #[derive(Debug)]
 pub struct FifoQueue<T>
-where 
+where
     T: Send + Sync + 'static,
 {
     sender: Arc<Mutex<Option<Sender<T>>>>,
@@ -20,14 +25,14 @@ where
 }
 
 impl<T> FifoQueue<T>
-where 
+where
     T: Send + Sync + 'static,
 {
     /// Creates a new [`FifoQueue`](crate::queue::fifo::FifoQueue) instance with the specified maximum capacity.
     ///
     /// # Arguments
     /// * `max_capacity` - The maximum capacity of the queue.
-    /// 
+    ///
     /// # Returns
     /// A new [`FifoQueue`](crate::queue::fifo::FifoQueue) instance with the specified maximum capacity.
     pub fn new(max_capacity: usize) -> Self {
@@ -42,10 +47,9 @@ where
     }
 }
 
-
 #[async_trait]
 impl<T> Queue for FifoQueue<T>
-where 
+where
     T: Send + Sync + 'static,
 {
     type Item = T;
@@ -56,7 +60,8 @@ where
             return Err(Error::Closed);
         }
 
-        let sender = self.sender
+        let sender = self
+            .sender
             .lock()
             .await
             .as_ref()
@@ -67,20 +72,22 @@ where
                 s.send(item)
                     .await
                     .map_err(|e| Error::EnqueueError(e.to_string()))?;
-                self.length.fetch_add(1, Ordering::SeqCst);
+                self.length
+                    .fetch_add(1, Ordering::SeqCst);
 
                 Ok(())
-            },
+            }
             None => Err(Error::Closed),
         }
     }
 
     async fn dequeue(&self) -> Result<Option<Self::Item>> {
         let mut receiver = self.receiver.lock().await;
-        
+
         let item = receiver.next().await;
         if item.is_some() {
-            self.length.fetch_sub(1, Ordering::SeqCst);
+            self.length
+                .fetch_sub(1, Ordering::SeqCst);
         }
 
         Ok(item)
@@ -93,11 +100,11 @@ where
     async fn close(&self) -> Result<()> {
         let _ = self.sender.lock().await.take();
         self.length.store(0, Ordering::SeqCst);
-        self.closed.store(true, Ordering::SeqCst);
+        self.closed
+            .store(true, Ordering::SeqCst);
         Ok(())
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -153,7 +160,10 @@ mod tests {
     #[tokio::test]
     async fn test_close_prevents_enqueue() {
         let queue = FifoQueue::new(10);
-        queue.enqueue("hello", None).await.unwrap();
+        queue
+            .enqueue("hello", None)
+            .await
+            .unwrap();
 
         queue.close().await.unwrap();
 

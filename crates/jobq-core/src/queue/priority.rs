@@ -1,10 +1,19 @@
 use async_trait::async_trait;
-use mea::mutex::Mutex;
-use std::{collections::BinaryHeap, cmp::Ordering, sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering}}};
 use event_listener::Event;
+use mea::mutex::Mutex;
+use std::{
+    cmp::Ordering,
+    collections::BinaryHeap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
+    },
+};
 
-use crate::queue::{traits::Queue, error::{Error, Result}};
-
+use crate::queue::{
+    error::{Error, Result},
+    traits::Queue,
+};
 
 /// Wrapper for items with priority
 #[derive(Debug)]
@@ -16,8 +25,7 @@ struct PriorityItem<T> {
 
 impl<T> PartialEq for PriorityItem<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.priority == other.priority
-            && self.idx == other.idx
+        self.priority == other.priority && self.idx == other.idx
     }
 }
 
@@ -31,11 +39,11 @@ impl<T> PartialOrd for PriorityItem<T> {
 
 impl<T> Ord for PriorityItem<T> {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.priority.cmp(&other.priority)
+        self.priority
+            .cmp(&other.priority)
             .then_with(|| other.idx.cmp(&self.idx))
     }
 }
-
 
 #[derive(Debug, Clone)]
 pub struct PriorityOptions {
@@ -59,7 +67,7 @@ where
     T: Send + Sync + 'static,
 {
     /// Creates a new [`PriorityQueue`](crate::queue::priority::PriorityQueue) instance.
-    /// 
+    ///
     /// # Returns
     /// A new [`PriorityQueue`](crate::queue::priority::PriorityQueue) instance.
     pub fn new(max_capacity: usize) -> Self {
@@ -89,13 +97,16 @@ where
         let priority = options
             .map(|opt| opt.priority)
             .unwrap_or(0);
-        let idx = self.idx_counter.fetch_add(1, AtomicOrdering::SeqCst);
+        let idx = self
+            .idx_counter
+            .fetch_add(1, AtomicOrdering::SeqCst);
 
         let mut guard = self.heap.lock().await;
         guard.push(PriorityItem { item, priority, idx });
         drop(guard);
-        
-        self.length.fetch_add(1, AtomicOrdering::SeqCst);
+
+        self.length
+            .fetch_add(1, AtomicOrdering::SeqCst);
         self.notify.notify(1);
 
         Ok(())
@@ -110,7 +121,8 @@ where
 
             let mut guard = self.heap.lock().await;
             if let Some(item) = guard.pop() {
-                self.length.fetch_sub(1, AtomicOrdering::SeqCst);
+                self.length
+                    .fetch_sub(1, AtomicOrdering::SeqCst);
                 return Ok(Some(item.item));
             }
 
@@ -124,13 +136,13 @@ where
     }
 
     async fn close(&self) -> Result<()> {
-        self.closed.store(true, AtomicOrdering::SeqCst);
+        self.closed
+            .store(true, AtomicOrdering::SeqCst);
         self.notify.notify(usize::MAX);
 
         Ok(())
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -142,16 +154,34 @@ mod tests {
         Some(PriorityOptions { priority })
     }
 
-   #[tokio::test]
+    #[tokio::test]
     async fn test_priority_order_with_insertion_stability() {
         let queue = PriorityQueue::new(10);
 
-        queue.enqueue("low1", opts(1)).await.unwrap();
-        queue.enqueue("medium1", opts(5)).await.unwrap();
-        queue.enqueue("high1", opts(10)).await.unwrap();
-        queue.enqueue("low2", opts(1)).await.unwrap();
-        queue.enqueue("medium2", opts(5)).await.unwrap();
-        queue.enqueue("high2", opts(10)).await.unwrap();
+        queue
+            .enqueue("low1", opts(1))
+            .await
+            .unwrap();
+        queue
+            .enqueue("medium1", opts(5))
+            .await
+            .unwrap();
+        queue
+            .enqueue("high1", opts(10))
+            .await
+            .unwrap();
+        queue
+            .enqueue("low2", opts(1))
+            .await
+            .unwrap();
+        queue
+            .enqueue("medium2", opts(5))
+            .await
+            .unwrap();
+        queue
+            .enqueue("high2", opts(10))
+            .await
+            .unwrap();
 
         queue.close().await.unwrap();
 
@@ -170,10 +200,16 @@ mod tests {
 
         assert_eq!(queue.len().await, 0);
 
-        queue.enqueue("task1", opts(1)).await.unwrap();
+        queue
+            .enqueue("task1", opts(1))
+            .await
+            .unwrap();
         assert_eq!(queue.len().await, 1);
 
-        queue.enqueue("task2", opts(2)).await.unwrap();
+        queue
+            .enqueue("task2", opts(2))
+            .await
+            .unwrap();
         assert_eq!(queue.len().await, 2);
 
         queue.dequeue().await.unwrap(); // Removes one item
@@ -193,7 +229,10 @@ mod tests {
         // Let the dequeue start and block
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        queue.enqueue("delayed", opts(5)).await.unwrap();
+        queue
+            .enqueue("delayed", opts(5))
+            .await
+            .unwrap();
 
         handle.await.unwrap();
     }
@@ -202,23 +241,29 @@ mod tests {
     async fn test_concurrent_enqueue_and_dequeue() {
         let queue = Arc::new(PriorityQueue::new(15));
 
-        let producers: Vec<_> = (0..10).map(|i| {
-            let q = queue.clone();
-            task::spawn(async move {
-                q.enqueue(format!("item{}", i), opts(i)).await.unwrap();
+        let producers: Vec<_> = (0..10)
+            .map(|i| {
+                let q = queue.clone();
+                task::spawn(async move {
+                    q.enqueue(format!("item{}", i), opts(i))
+                        .await
+                        .unwrap();
+                })
             })
-        }).collect();
+            .collect();
 
-        let consumers: Vec<_> = (0..10).map(|_| {
-            let q = queue.clone();
-            task::spawn(async move {
-                loop {
-                    if let Some(item) = q.dequeue().await.unwrap() {
-                        break Some(item);
+        let consumers: Vec<_> = (0..10)
+            .map(|_| {
+                let q = queue.clone();
+                task::spawn(async move {
+                    loop {
+                        if let Some(item) = q.dequeue().await.unwrap() {
+                            break Some(item);
+                        }
                     }
-                }
+                })
             })
-        }).collect();
+            .collect();
 
         for p in producers {
             p.await.unwrap();
@@ -263,9 +308,18 @@ mod tests {
     async fn test_stability_same_priority() {
         let queue = PriorityQueue::new(10);
 
-        queue.enqueue("a", opts(3)).await.unwrap();
-        queue.enqueue("b", opts(3)).await.unwrap();
-        queue.enqueue("c", opts(3)).await.unwrap();
+        queue
+            .enqueue("a", opts(3))
+            .await
+            .unwrap();
+        queue
+            .enqueue("b", opts(3))
+            .await
+            .unwrap();
+        queue
+            .enqueue("c", opts(3))
+            .await
+            .unwrap();
 
         queue.close().await.unwrap();
 
@@ -281,8 +335,14 @@ mod tests {
     async fn test_default_priority_zero() {
         let queue = PriorityQueue::new(10);
 
-        queue.enqueue("explicit_high", opts(10)).await.unwrap();
-        queue.enqueue("default", None).await.unwrap(); // Priority 0
+        queue
+            .enqueue("explicit_high", opts(10))
+            .await
+            .unwrap();
+        queue
+            .enqueue("default", None)
+            .await
+            .unwrap(); // Priority 0
 
         queue.close().await.unwrap();
 
@@ -300,7 +360,9 @@ mod tests {
 
         queue.close().await.unwrap();
 
-        let result = queue.enqueue("should_fail", opts(1)).await;
+        let result = queue
+            .enqueue("should_fail", opts(1))
+            .await;
         assert!(matches!(result, Err(Error::Closed)));
     }
 }

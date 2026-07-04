@@ -1,20 +1,22 @@
-use std::{sync::Arc, marker::PhantomData, time::Duration};
 use async_trait::async_trait;
-use futures::{select, future::{FutureExt, join_all}};
-use futures_timeout::TimeoutExt;
 use event_listener::Event;
+use futures::{
+    future::{FutureExt, join_all},
+    select,
+};
+use futures_timeout::TimeoutExt;
+use std::{marker::PhantomData, sync::Arc, time::Duration};
 
 use crate::{
-    task::Task,
     job::{Job, JobQueue},
     queue::traits::Queue,
+    task::Task,
 };
-
 
 /// Trait for defining a worker that processes jobs from a job queue.
 #[async_trait]
 pub trait Worker<T, Q>: Send + Sync
-where 
+where
     T: Task + 'static,
     Q: Queue<Item = Job<T>> + 'static,
 {
@@ -24,12 +26,12 @@ where
     fn id(&self) -> usize;
 
     /// Creates a new worker instance.
-    /// 
+    ///
     /// # Arguments
     /// * `id` - The unique identifier for the worker.
     /// * `queue` - The job queue from which the worker will dequeue jobs.
     /// * `options` - Additional options for configuring the worker.
-    /// 
+    ///
     /// # Returns
     /// A new worker instance.
     fn create(id: usize, queue: Arc<JobQueue<T, Q>>, options: Self::Options) -> Self
@@ -43,7 +45,6 @@ where
     async fn shutdown(&self);
 }
 
-
 /// A worker that processes jobs one at a time from a job queue.
 #[derive(Debug)]
 pub struct JobWorker<T, Q>
@@ -53,7 +54,7 @@ where
 {
     id: usize,
     queue: Arc<JobQueue<T, Q>>,
-    shutdown: Arc<Event>
+    shutdown: Arc<Event>,
 }
 
 #[async_trait]
@@ -69,7 +70,11 @@ where
     }
 
     fn create(id: usize, queue: Arc<JobQueue<T, Q>>, _options: Self::Options) -> Self {
-        Self { id, queue, shutdown: Arc::new(Event::new()) }
+        Self {
+            id,
+            queue,
+            shutdown: Arc::new(Event::new()),
+        }
     }
 
     async fn run(&self) {
@@ -91,7 +96,6 @@ where
     }
 }
 
-
 /// Options for configuring a [`BatchJobWorker`](crate::worker::BatchJobWorker).
 #[derive(Debug, Clone)]
 pub struct BatchJobWorkerOptions {
@@ -110,7 +114,6 @@ impl Default for BatchJobWorkerOptions {
         }
     }
 }
-
 
 /// A worker that processes jobs in batches from a [`JobQueue`](crate::job::JobQueue).
 #[derive(Debug)]
@@ -131,13 +134,18 @@ where
     Q: Queue<Item = Job<T>> + 'static,
 {
     /// Creates a new [`BatchJobWorker`](crate::worker::BatchJobWorker) instance.
-    /// 
+    ///
     /// # Arguments
     /// * `id` - The unique identifier for the worker.
     /// * `queue` - The job queue from which the worker will dequeue jobs.
     /// * `options` - Options for configuring the batch processing behavior.
     pub fn new(id: usize, queue: Arc<JobQueue<T, Q>>, options: BatchJobWorkerOptions) -> Self {
-        Self { id, queue, options, shutdown: Arc::new(Event::new()) }
+        Self {
+            id,
+            queue,
+            options,
+            shutdown: Arc::new(Event::new()),
+        }
     }
 
     /// Collects a batch of jobs from the queue.
@@ -145,7 +153,8 @@ where
         let mut jobs = Vec::with_capacity(batch_size);
 
         while jobs.len() < batch_size {
-            match self.queue
+            match self
+                .queue
                 .dequeue_job()
                 .timeout(batch_timeout)
                 .await
@@ -202,7 +211,6 @@ where
     }
 }
 
-
 /// A worker pool that manages multiple workers processing jobs from a job queue.
 #[derive(Debug)]
 pub struct WorkerPool<T, Q, W>
@@ -216,16 +224,16 @@ where
 }
 
 impl<T, Q, W> WorkerPool<T, Q, W>
-where 
+where
     T: Task + 'static,
     Q: Queue<Item = Job<T>> + 'static,
     W: Worker<T, Q> + 'static,
 {
     /// Creates a new [`WorkerPool`](crate::worker::WorkerPool) instance with the specified workers.
-    /// 
+    ///
     /// # Arguments
     /// * `workers` - A vector of worker instances to be managed by the pool.
-    /// 
+    ///
     /// # Returns
     /// A new [`WorkerPool`](crate::worker::WorkerPool) instance.
     pub fn new(workers: Vec<Arc<W>>) -> Self {
@@ -233,9 +241,9 @@ where
     }
 
     /// Executes all workers in the pool concurrently.
-    /// 
+    ///
     /// This method will run all workers until they complete or are shut down.
-    /// 
+    ///
     /// # Returns
     /// A future that resolves when all workers have completed their execution.
     pub async fn run(&self) {
@@ -243,15 +251,15 @@ where
             self.workers
                 .iter()
                 .map(|worker| worker.run())
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
         )
         .await;
     }
 
     /// Shuts down all workers in the pool.
-    /// 
+    ///
     /// This method will signal all workers to stop processing jobs.
-    /// 
+    ///
     /// # Returns
     /// A future that resolves when all workers have been shut down.
     pub async fn shutdown(&self) {
@@ -259,13 +267,13 @@ where
             self.workers
                 .iter()
                 .map(|worker| worker.shutdown())
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
         )
         .await;
     }
 
     /// Returns a reference to the workers in the pool.
-    /// 
+    ///
     /// # Returns
     /// A slice of `Arc<W>` containing the workers in the pool.
     pub fn workers(&self) -> &[Arc<W>] {
@@ -273,7 +281,7 @@ where
     }
 
     /// Returns the number of workers in the pool.
-    /// 
+    ///
     /// # Returns
     /// The number of workers as a `usize`.
     pub fn num_workers(&self) -> usize {
@@ -281,10 +289,10 @@ where
     }
 
     /// Gets a worker by its unique identifier.
-    /// 
+    ///
     /// # Arguments
     /// * `id` - The unique identifier of the worker to retrieve.
-    /// 
+    ///
     /// # Returns
     /// An `Option<Arc<W>>` containing the worker if found, or `None` if no worker with the given ID exists.
     pub fn get_worker(&self, id: usize) -> Option<Arc<W>> {
@@ -300,7 +308,6 @@ where
         WorkerPoolBuilder::new()
     }
 }
-
 
 /// A builder for creating a [`WorkerPool`](crate::worker::WorkerPool).
 #[derive(Debug)]
@@ -344,10 +351,10 @@ where
     }
 
     /// Sets the number of workers in the pool.
-    /// 
+    ///
     /// # Arguments
     /// * `num_workers` - The number of workers to create in the pool.
-    /// 
+    ///
     /// # Returns
     /// A mutable reference to the builder instance for method chaining.
     pub fn with_num_workers(mut self, num_workers: usize) -> Self {
@@ -359,7 +366,7 @@ where
     ///
     /// # Arguments
     /// * `options` - The options to configure the workers in the pool.
-    /// 
+    ///
     /// # Returns
     /// A mutable reference to the builder instance for method chaining.
     pub fn with_options(mut self, options: W::Options) -> Self {
@@ -368,10 +375,10 @@ where
     }
 
     /// Sets the [`JobQueue`](crate::job::JobQueue) for the worker pool.
-    /// 
+    ///
     /// # Arguments
     /// * `queue` - The job queue to be used by the workers in the pool
-    /// 
+    ///
     /// # Returns
     /// A mutable reference to the builder instance for method chaining.
     pub fn with_queue(mut self, queue: Arc<JobQueue<T, Q>>) -> Self {
@@ -380,17 +387,23 @@ where
     }
 
     /// Builds the [`WorkerPool`](crate::worker::WorkerPool) with the specified workers.
-    /// 
+    ///
     /// # Returns
     /// A new [`WorkerPool`](crate::worker::WorkerPool) instance wrapped in `Arc` containing the configured workers.
     pub fn build(self) -> Arc<WorkerPool<T, Q, W>> {
         Arc::new(WorkerPool {
             workers: (0..self.num_workers)
-                .map(|id| Arc::new(W::create(
-                    id,
-                    self.queue.clone().expect("Queue must be set before building"),
-                    self.worker_options.clone().unwrap_or_default(),
-                )))
+                .map(|id| {
+                    Arc::new(W::create(
+                        id,
+                        self.queue
+                            .clone()
+                            .expect("Queue must be set before building"),
+                        self.worker_options
+                            .clone()
+                            .unwrap_or_default(),
+                    ))
+                })
                 .collect(),
             __marker: PhantomData,
         })

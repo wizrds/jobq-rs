@@ -2,16 +2,18 @@
 extern crate self as jobq;
 
 pub use jobq_core::{
-    task::Task,
-    future::{JobFuture, JobFutureSet},
-    builder::{QueueSystemBuilder, JobQueueSystemBuilder, BatchJobQueueSystemBuilder},
-    job::{Job, JobQueue, JobQueueBuilder, JobOptions, JobStatus},
-    worker::{Worker, WorkerPool, WorkerPoolBuilder, JobWorker, BatchJobWorker, BatchJobWorkerOptions},
+    builder::{BatchJobQueueSystemBuilder, JobQueueSystemBuilder, QueueSystemBuilder},
     error::{Error, Result},
+    future::{JobFuture, JobFutureSet},
+    job::{Job, JobOptions, JobQueue, JobQueueBuilder, JobStatus},
     queue::{
-        traits::Queue,
         fifo::FifoQueue,
         lifo::LifoQueue,
-        priority::{PriorityQueue, PriorityOptions},
+        priority::{PriorityOptions, PriorityQueue},
+        traits::Queue,
+    },
+    task::Task,
+    worker::{
+        BatchJobWorker, BatchJobWorkerOptions, JobWorker, Worker, WorkerPool, WorkerPoolBuilder,
     },
 };

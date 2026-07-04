@@ -1,15 +1,20 @@
 use async_trait::async_trait;
-use std::collections::VecDeque;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-use mea::{mutex::Mutex};
 use event_listener::Event;
+use mea::mutex::Mutex;
+use std::collections::VecDeque;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
-use crate::queue::{traits::Queue, error::{Error, Result}};
-
+use crate::queue::{
+    error::{Error, Result},
+    traits::Queue,
+};
 
 /// A Last In First Out (LIFO) queue implementation.
 pub struct LifoQueue<T>
-where 
+where
     T: Send + Sync + 'static,
 {
     inner: Mutex<VecDeque<T>>,
@@ -18,14 +23,14 @@ where
 }
 
 impl<T> LifoQueue<T>
-where 
+where
     T: Send + Sync + 'static,
 {
     /// Creates a new [`LifoQueue`](crate::queue::lifo::LifoQueue) instance with the specified maximum capacity.
-    /// 
+    ///
     /// # Arguments
     /// * `max_capacity` - The maximum capacity of the queue.
-    /// 
+    ///
     /// # Returns
     /// A new [`LifoQueue`](crate::queue::lifo::LifoQueue) instance with the specified maximum capacity.
     pub fn new(max_capacity: usize) -> Self {
@@ -82,20 +87,20 @@ where
     }
 
     async fn close(&self) -> Result<()> {
-        self.closed.store(true, Ordering::SeqCst);
+        self.closed
+            .store(true, Ordering::SeqCst);
         self.notify.notify(usize::MAX);
 
         Ok(())
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
     use tokio::task;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     #[tokio::test]
     async fn test_enqueue_dequeue_lifo_order() {
@@ -224,9 +229,7 @@ mod tests {
 
         let consumers = (0..10).map(|_| {
             let q = queue.clone();
-            task::spawn(async move {
-                q.dequeue().await.unwrap()
-            })
+            task::spawn(async move { q.dequeue().await.unwrap() })
         });
 
         let (_, results) = tokio::join!(
@@ -234,7 +237,10 @@ mod tests {
             futures::future::join_all(consumers)
         );
 
-        let values = results.into_iter().filter_map(|r| r.unwrap()).collect::<Vec<_>>();
+        let values = results
+            .into_iter()
+            .filter_map(|r| r.unwrap())
+            .collect::<Vec<_>>();
         assert_eq!(values.len(), 10);
     }
 
