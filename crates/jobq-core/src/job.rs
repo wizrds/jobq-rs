@@ -2,7 +2,7 @@ use futures::future::FutureExt;
 use std::{any::Any, marker::PhantomData, panic::AssertUnwindSafe, sync::Arc};
 
 use crate::{
-    error::{Error, Result},
+    error::Error,
     future::{JobFuture, JobFutureSetter},
     queue::{fifo::FifoQueue, lifo::LifoQueue, priority::PriorityQueue, traits::Queue},
     task::Task,
@@ -143,13 +143,13 @@ where
                     self.status = JobStatus::Completed;
                 }
                 Ok(Err(e)) if self.retries >= self.max_retries => {
-                    result = Some(Err(Error::TaskExecution(e.to_string())));
+                    result = Some(Err(Error::task_execution(e)));
                     self.status = JobStatus::Failed;
                 }
                 Ok(Err(_)) => continue,
                 // A panic fails the job immediately, regardless of remaining retries.
                 Err(panic) => {
-                    result = Some(Err(Error::TaskPanic(panic_message(panic))));
+                    result = Some(Err(Error::task_panic(panic_message(panic))));
                     self.status = JobStatus::Failed;
                 }
             }
@@ -207,7 +207,7 @@ where
     /// # Returns
     /// A `Result` containing a [`JobFuture`](crate::future::JobFuture) that can be awaited for the
     /// [`Job`](crate::job::Job)'s result, or an error if the job could not be enqueued.
-    pub async fn enqueue_job(&self, options: JobOptions<T, Q>) -> Result<JobFuture<T::Output>> {
+    pub async fn enqueue_job(&self, options: JobOptions<T, Q>) -> Result<JobFuture<T::Output>, Error> {
         let (task, max_retries, queue_options) = options.into_parts();
         let (job, future) = Job::new(task, max_retries);
         self.enqueue(job, queue_options).await?;
@@ -222,22 +222,22 @@ where
     ///
     /// # Returns
     /// A `Result` indicating success or failure of the enqueue operation.
-    pub async fn enqueue(&self, job: Job<T>, options: Option<Q::Options>) -> Result<()> {
+    pub async fn enqueue(&self, job: Job<T>, options: Option<Q::Options>) -> Result<(), Error> {
         self.inner
             .enqueue(job, options)
             .await
-            .map_err(Error::from)
+            .map_err(Error::queue)
     }
 
     /// Dequeues a [`Job`](crate::job::Job) from the queue.
     ///
     /// # Returns
     /// A `Result` containing an `Option<Job<T>>`, which is `Some` if a job was successfully dequeued, or `None` if the queue is closed.
-    pub async fn dequeue_job(&self) -> Result<Option<Job<T>>> {
+    pub async fn dequeue_job(&self) -> Result<Option<Job<T>>, Error> {
         self.inner
             .dequeue()
             .await
-            .map_err(Error::from)
+            .map_err(Error::queue)
     }
 
     /// Returns the number of [`Job`](crate::job::Job)s currently in the queue.
@@ -257,11 +257,11 @@ where
     ///
     /// # Returns
     /// A `Result` indicating success or failure of the close operation.
-    pub async fn close(&self) -> Result<()> {
+    pub async fn close(&self) -> Result<(), Error> {
         self.inner
             .close()
             .await
-            .map_err(Error::from)
+            .map_err(Error::queue)
     }
 
     /// Get a [`JobQueueBuilder`] for creating a [`JobQueue`](crate::job::JobQueue) with the specified task and queue types.
@@ -372,6 +372,10 @@ mod tests {
     use crate::task::Task;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[derive(Debug, thiserror::Error)]
+    #[error("{0}")]
+    struct TestError(String);
+
     struct PanicTask {
         calls: Arc<AtomicUsize>,
     }
@@ -379,7 +383,7 @@ mod tests {
     #[async_trait::async_trait]
     impl Task for PanicTask {
         type Output = u32;
-        type Error = String;
+        type Error = TestError;
 
         async fn execute(&self) -> std::result::Result<Self::Output, Self::Error> {
             self.calls
@@ -395,10 +399,26 @@ mod tests {
     #[async_trait::async_trait]
     impl Task for DoubleTask {
         type Output = u32;
-        type Error = String;
+        type Error = TestError;
 
         async fn execute(&self) -> std::result::Result<Self::Output, Self::Error> {
             Ok(self.n * 2)
+        }
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("boom: {0}")]
+    struct RichError(u32);
+
+    struct FailingTask;
+
+    #[async_trait::async_trait]
+    impl Task for FailingTask {
+        type Output = u32;
+        type Error = RichError;
+
+        async fn execute(&self) -> std::result::Result<Self::Output, Self::Error> {
+            Err(RichError(7))
         }
     }
 
@@ -422,5 +442,23 @@ mod tests {
 
         assert_eq!(job.status(), JobStatus::Completed);
         assert_eq!(future.result().await.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn task_error_identity_is_preserved_through_job_execute() {
+        let (mut job, future) = Job::new(FailingTask, 1);
+
+        job.execute().await;
+
+        match future.result().await {
+            Err(Error::TaskExecution { source, .. }) => {
+                let original = source
+                    .downcast_ref::<RichError>()
+                    .expect("original error type should be recoverable");
+
+                assert_eq!(original.0, 7);
+            }
+            other => panic!("expected Err(Error::TaskExecution {{ .. }}), got {other:?}"),
+        }
     }
 }

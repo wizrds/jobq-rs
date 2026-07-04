@@ -13,7 +13,7 @@ use std::{
     },
 };
 
-use crate::error::{Error, Result};
+use crate::error::Error;
 
 /// Represents a future that can be awaited to get the result of a [`Job`](crate::job::Job).
 pub struct JobFuture<T>
@@ -52,7 +52,7 @@ where
     ///
     /// # Returns
     /// A `Result` containing the [`Job`](crate::job::Job)'s output if successful, or an error if the task failed or the future was closed.
-    pub async fn result(&self) -> Result<T> {
+    pub async fn result(&self) -> Result<T, Error> {
         let mut inner = self.inner.lock().await;
 
         if let Some(result) = inner.result.take() {
@@ -60,15 +60,15 @@ where
         }
 
         if inner.closed.load(Ordering::SeqCst) {
-            return Err(Error::FutureClosed);
+            return Err(Error::future_closed());
         }
 
         match inner.receiver.take() {
             Some(receiver) => match receiver.await {
                 Ok(result) => result,
-                Err(_) => Err(Error::FutureClosed),
+                Err(_) => Err(Error::future_closed()),
             },
-            None => Err(Error::FutureClosed),
+            None => Err(Error::future_closed()),
         }
     }
 
@@ -87,8 +87,8 @@ impl<T> IntoFuture for JobFuture<T>
 where
     T: Send + Sync + 'static,
 {
-    type Output = Result<T>;
-    type IntoFuture = BoxFuture<'static, Result<T>>;
+    type Output = Result<T, Error>;
+    type IntoFuture = BoxFuture<'static, Result<T, Error>>;
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move { self.result().await })
@@ -99,8 +99,8 @@ pub struct JobFutureInner<T>
 where
     T: Send + Sync,
 {
-    result: Option<Result<T>>,
-    receiver: Option<Receiver<Result<T>>>,
+    result: Option<Result<T, Error>>,
+    receiver: Option<Receiver<Result<T, Error>>>,
     closed: AtomicBool,
 }
 
@@ -111,7 +111,7 @@ pub struct JobFutureSetter<T>
 where
     T: Send + Sync,
 {
-    sender: Option<Sender<Result<T>>>,
+    sender: Option<Sender<Result<T, Error>>>,
 }
 
 impl<T> JobFutureSetter<T>
@@ -122,7 +122,7 @@ where
     ///
     /// # Arguments
     /// * `result` - The result of the [`Job`](crate::job::Job) to be sent.
-    pub fn set_result(&mut self, result: Result<T>) {
+    pub fn set_result(&mut self, result: Result<T, Error>) {
         if let Some(sender) = self.sender.take() {
             let _ = sender.send(result);
         }
@@ -153,7 +153,7 @@ where
     }
 
     /// Awaits all futures in the set and returns a vector of their results.
-    pub async fn join_all(self) -> Vec<Result<T>> {
+    pub async fn join_all(self) -> Vec<Result<T, Error>> {
         join_all(
             self.futures
                 .into_iter()
@@ -163,7 +163,7 @@ where
     }
 
     /// Awaits all futures in the set and returns a vector of their results, returning an error if any future fails.
-    pub async fn try_join_all(self) -> Result<Vec<T>> {
+    pub async fn try_join_all(self) -> Result<Vec<T>, Error> {
         try_join_all(
             self.futures
                 .into_iter()
@@ -177,8 +177,8 @@ impl<T> IntoFuture for JobFutureSet<T>
 where
     T: Send + Sync + 'static,
 {
-    type Output = Vec<Result<T>>;
-    type IntoFuture = BoxFuture<'static, Vec<Result<T>>>;
+    type Output = Vec<Result<T, Error>>;
+    type IntoFuture = BoxFuture<'static, Vec<Result<T, Error>>>;
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move { self.join_all().await })

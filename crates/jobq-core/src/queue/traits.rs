@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::queue::error::Result;
+use crate::queue::error::Error;
 
 /// Trait defining the behavior of a queue in the job queue system.
 ///
@@ -20,13 +20,13 @@ pub trait Queue: Send + Sync {
     ///
     /// # Returns
     /// A `Result` indicating success or failure of the enqueue operation.
-    async fn enqueue(&self, item: Self::Item, options: Option<Self::Options>) -> Result<()>;
+    async fn enqueue(&self, item: Self::Item, options: Option<Self::Options>) -> Result<(), Error>;
 
     /// Dequeues an item from the queue.
     ///
     /// # Returns
     /// A `Result` containing an `Option<Self::Item>`, which is `Some` if an item was successfully dequeued, or `None` if the queue is closed.
-    async fn dequeue(&self) -> Result<Option<Self::Item>>;
+    async fn dequeue(&self) -> Result<Option<Self::Item>, Error>;
 
     /// Returns the number of items currently in the queue.
     async fn len(&self) -> usize;
@@ -40,5 +40,5 @@ pub trait Queue: Send + Sync {
     ///
     /// # Returns
     /// A `Result` indicating success or failure of the close operation.
-    async fn close(&self) -> Result<()>;
+    async fn close(&self) -> Result<(), Error>;
 }

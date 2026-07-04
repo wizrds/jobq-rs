@@ -8,7 +8,7 @@ use std::sync::{
 };
 
 use crate::queue::{
-    error::{Error, Result},
+    error::Error,
     traits::Queue,
 };
 
@@ -50,9 +50,9 @@ where
     type Item = T;
     type Options = ();
 
-    async fn enqueue(&self, item: Self::Item, _options: Option<Self::Options>) -> Result<()> {
+    async fn enqueue(&self, item: Self::Item, _options: Option<Self::Options>) -> Result<(), Error> {
         if self.closed.load(Ordering::SeqCst) {
-            return Err(Error::Closed);
+            return Err(Error::closed());
         }
 
         let mut guard = self.inner.lock().await;
@@ -63,7 +63,7 @@ where
         Ok(())
     }
 
-    async fn dequeue(&self) -> Result<Option<Self::Item>> {
+    async fn dequeue(&self) -> Result<Option<Self::Item>, Error> {
         loop {
             if self.closed.load(Ordering::SeqCst) {
                 let mut guard = self.inner.lock().await;
@@ -86,7 +86,7 @@ where
         guard.len()
     }
 
-    async fn close(&self) -> Result<()> {
+    async fn close(&self) -> Result<(), Error> {
         self.closed
             .store(true, Ordering::SeqCst);
         self.notify.notify(usize::MAX);

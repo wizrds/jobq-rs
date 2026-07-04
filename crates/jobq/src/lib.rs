@@ -3,7 +3,7 @@ extern crate self as jobq;
 
 pub use jobq_core::{
     builder::{BatchJobQueueSystemBuilder, JobQueueSystemBuilder, QueueSystemBuilder},
-    error::{Error, Result},
+    error::Error,
     future::{JobFuture, JobFutureSet},
     job::{Job, JobOptions, JobQueue, JobQueueBuilder, JobStatus},
     queue::{

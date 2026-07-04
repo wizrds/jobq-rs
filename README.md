@@ -2,7 +2,7 @@
 
 ## Overview
 
-JobQ is a lightweight, in-memory job queue implementation in Rust designed for asynchronous task processing within the same process. It allows for simple job scheduling and processing, suitable for applications that require asynchronous task handling without the need for distributed messaging systems. It is derived from its Golang counterpart found [here](https://gitlab.com/emergentmethods/jobq).
+JobQ is a lightweight, in-memory job queue implementation in Rust designed for asynchronous task processing within the same process. It allows for simple job scheduling and processing, suitable for applications that require asynchronous task handling without the need for distributed messaging systems.
 
 ## Features
 
@@ -37,6 +37,10 @@ Implement the `Task` interface for the work you want to perform:
 ```rust
 use jobq::Task;
 
+#[derive(Debug, thiserror::Error)]
+#[error("cannot process zero")]
+pub struct MyTaskError;
+
 pub struct MyTask {
     n: u32,
 }
@@ -44,11 +48,11 @@ pub struct MyTask {
 #[async_trait::async_trait]
 impl Task for MyTask {
     type Output = u32;
-    type Error = String;
+    type Error = MyTaskError;
 
     async fn execute(&self) -> Result<Self::Output, Self::Error> {
         if self.n == 0 {
-            Err("Cannot process zero".to_string())
+            Err(MyTaskError)
         } else {
             Ok(self.n * 2)
         }
@@ -56,12 +60,14 @@ impl Task for MyTask {
 }
 ```
 
+A task's `Error` type must implement `std::error::Error`, which is what `#[derive(thiserror::Error)]` provides above (add `thiserror` to your own `Cargo.toml` for this, or implement `std::error::Error` by hand if you would rather not take the dependency).
+
 If a task's `execute` method panics, the panic is caught and surfaced as a failed job result (`Error::TaskPanic`) rather than taking down the worker. A panic fails the job immediately and is never retried. Note that tasks should avoid panicking while holding shared invariants (for example, data behind interior mutability shared with other tasks), since the catch boundary cannot guarantee such state is left in a consistent state.
 
 ### Creating a JobQueue and enqueueing a Job
 
 ```rust
-use jobq::{JobQueueSystemBuilder, Task, JobOptions};
+use jobq::{Error, JobOptions, JobQueueSystemBuilder, Task};
 
 
 #[tokio::main]
@@ -97,9 +103,16 @@ async fn main() {
         .await
         .unwrap();
 
-    // Wait for the job to complete and retrieve the result
+    // Wait for the job to complete and retrieve the result. A task's own error type
+    // is preserved through `Error::TaskExecution`'s `source` field, so it can be
+    // downcast back to the concrete type the task itself produced.
     match future.result().await {
         Ok(result) => println!("Job completed with result: {}", result),
+        Err(Error::TaskExecution { source, .. }) => {
+            if let Some(original) = source.downcast_ref::<MyTaskError>() {
+                println!("Task failed with its own error type: {original}");
+            }
+        }
         Err(e) => println!("Job failed with error: {}", e),
     };
 

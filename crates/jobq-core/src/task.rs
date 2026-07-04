@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use std::fmt::{Debug, Display};
 
 /// Trait representing a task that can be executed by the job queue.
 ///
@@ -8,7 +7,7 @@ use std::fmt::{Debug, Display};
 #[async_trait]
 pub trait Task: Send + Sync {
     type Output: Send + Sync;
-    type Error: Debug + Display + Send + Sync + 'static;
+    type Error: std::error::Error + Send + Sync + 'static;
 
     async fn execute(&self) -> Result<Self::Output, Self::Error>;
 }

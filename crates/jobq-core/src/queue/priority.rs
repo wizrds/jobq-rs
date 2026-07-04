@@ -11,7 +11,7 @@ use std::{
 };
 
 use crate::queue::{
-    error::{Error, Result},
+    error::Error,
     traits::Queue,
 };
 
@@ -89,9 +89,9 @@ where
     type Item = T;
     type Options = PriorityOptions;
 
-    async fn enqueue(&self, item: Self::Item, options: Option<Self::Options>) -> Result<()> {
+    async fn enqueue(&self, item: Self::Item, options: Option<Self::Options>) -> Result<(), Error> {
         if self.closed.load(AtomicOrdering::SeqCst) {
-            return Err(Error::Closed);
+            return Err(Error::closed());
         }
 
         let priority = options
@@ -112,7 +112,7 @@ where
         Ok(())
     }
 
-    async fn dequeue(&self) -> Result<Option<Self::Item>> {
+    async fn dequeue(&self) -> Result<Option<Self::Item>, Error> {
         loop {
             if self.closed.load(AtomicOrdering::SeqCst) {
                 let mut guard = self.heap.lock().await;
@@ -135,7 +135,7 @@ where
         self.length.load(AtomicOrdering::SeqCst)
     }
 
-    async fn close(&self) -> Result<()> {
+    async fn close(&self) -> Result<(), Error> {
         self.closed
             .store(true, AtomicOrdering::SeqCst);
         self.notify.notify(usize::MAX);

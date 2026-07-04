@@ -8,7 +8,7 @@ use std::sync::{
 };
 
 use crate::queue::{
-    error::{Error, Result},
+    error::Error,
     traits::Queue,
 };
 
@@ -55,9 +55,9 @@ where
     type Item = T;
     type Options = ();
 
-    async fn enqueue(&self, item: Self::Item, _options: Option<Self::Options>) -> Result<()> {
+    async fn enqueue(&self, item: Self::Item, _options: Option<Self::Options>) -> Result<(), Error> {
         if self.closed.load(Ordering::SeqCst) {
-            return Err(Error::Closed);
+            return Err(Error::closed());
         }
 
         let sender = self
@@ -71,17 +71,17 @@ where
             Some(mut s) => {
                 s.send(item)
                     .await
-                    .map_err(|e| Error::EnqueueError(e.to_string()))?;
+                    .map_err(|e| Error::enqueue_error(e.to_string()))?;
                 self.length
                     .fetch_add(1, Ordering::SeqCst);
 
                 Ok(())
             }
-            None => Err(Error::Closed),
+            None => Err(Error::closed()),
         }
     }
 
-    async fn dequeue(&self) -> Result<Option<Self::Item>> {
+    async fn dequeue(&self) -> Result<Option<Self::Item>, Error> {
         let mut receiver = self.receiver.lock().await;
 
         let item = receiver.next().await;
@@ -97,7 +97,7 @@ where
         self.length.load(Ordering::SeqCst)
     }
 
-    async fn close(&self) -> Result<()> {
+    async fn close(&self) -> Result<(), Error> {
         let _ = self.sender.lock().await.take();
         self.length.store(0, Ordering::SeqCst);
         self.closed
