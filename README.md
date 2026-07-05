@@ -131,6 +131,56 @@ JobQ provides two queue implementations:
 - **LIFOQueue**: A LIFO queue that holds jobs in the reverse order they were enqueued.
 - **PriorityQueue**: A priority queue that holds jobs in priority order. Jobs with a lower priority value will be processed first. Defining the priority is done in the `PriorityOptions` when enqueuing a job. This can be set via the `with_queue_options` method on the `JobOptions` struct.
 
+### Dynamic dispatch
+
+Every `JobQueue<T, Q>` normally accepts only one concrete `Task` type `T`. If you would rather run several unrelated kinds of work through a single pool of workers, build a queue over `AnyTask` instead, then use `enqueue_any` (for any `Task` implementation) or `enqueue_fn` (for a one-off async closure) to enqueue whatever you like. Each call still returns a future typed to that specific task's own output, even though the queue itself only ever stores one erased representation internally.
+
+```rust
+use jobq::{AnyTask, Error, JobQueueSystemBuilder, Task};
+
+#[tokio::main]
+async fn main() {
+    let (job_queue, worker_pool) = JobQueueSystemBuilder::<AnyTask, _>::fifo(10)
+        .with_num_workers(2)
+        .build();
+
+    let worker_pool_clone = worker_pool.clone();
+    let handle = tokio::spawn(async move {
+        worker_pool_clone.run().await;
+    });
+
+    // MyTask is the same task type shown above; its output type, u32, still flows
+    // through to `.result()` even though the queue itself only stores erased tasks.
+    let number_future = job_queue.enqueue_any(MyTask { n: 21 }).await.unwrap();
+
+    // enqueue_fn wraps a closure as a task without a hand-written struct.
+    let string_future = job_queue
+        .enqueue_fn(|| async { Ok::<String, MyTaskError>("hello!".to_string()) })
+        .await
+        .unwrap();
+
+    println!("number: {}", number_future.result().await.unwrap());
+    println!("string: {}", string_future.result().await.unwrap());
+
+    worker_pool.shutdown().await;
+    handle.await.unwrap();
+}
+```
+
+A failing erased task's own error type is preserved too, exactly like a non-erased task's: `AnyTask::Error` is `Box<dyn std::error::Error + Send + Sync>`, so `Error::TaskExecution`'s `source` field can still be downcast back to whatever concrete error the original task produced.
+
+```rust
+match number_future.result().await {
+    Err(Error::TaskExecution { source, .. }) => {
+        if let Some(original) = source.downcast_ref::<MyTaskError>() {
+            println!("Task failed with its own error type: {original}");
+        }
+    }
+    _ => {}
+}
+```
+
+`enqueue_any` and `enqueue_fn` always use the same defaults as `JobOptions::new(..)` (a single attempt, no queue options). If you need retries or queue options for an erased task, call the lower-level `enqueue_job` directly: `job_queue.enqueue_job(JobOptions::new(AnyTask::new(MyTask { n: 21 })).with_max_retries(3)).await`.
 
 ## License
 This project is licensed under ISC License.

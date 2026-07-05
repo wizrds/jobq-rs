@@ -4,8 +4,10 @@ use futures::{
 };
 use mea::mutex::Mutex;
 use std::{
+    any::Any,
     future::IntoFuture,
     iter::FromIterator,
+    marker::PhantomData,
     ops::{Deref, DerefMut},
     sync::{
         Arc,
@@ -13,7 +15,7 @@ use std::{
     },
 };
 
-use crate::error::Error;
+use crate::{error::Error, task::AnyTaskError};
 
 /// Represents a future that can be awaited to get the result of a [`Job`](crate::job::Job).
 pub struct JobFuture<T>
@@ -75,9 +77,8 @@ where
     /// Closes the future, preventing any further awaits on it.
     pub async fn close(&self) {
         let mut inner = self.inner.lock().await;
-        inner
-            .closed
-            .store(true, Ordering::SeqCst);
+
+        inner.closed.store(true, Ordering::SeqCst);
         inner.receiver.take(); // Drop the receiver to prevent further awaits
         inner.result.take(); // Clear any existing result
     }
@@ -125,6 +126,51 @@ where
     pub fn set_result(&mut self, result: Result<T, Error>) {
         if let Some(sender) = self.sender.take() {
             let _ = sender.send(result);
+        }
+    }
+}
+
+/// A [`JobFuture`](crate::future::JobFuture) for a job whose task was erased via
+/// [`AnyTask`](crate::task::AnyTask), downcasting the erased result back to the concrete
+/// output type known at the call site that erased it.
+pub struct AnyJobFuture<T> {
+    inner: JobFuture<Box<dyn Any + Send + Sync>>,
+    _marker: PhantomData<T>,
+}
+
+impl<T> AnyJobFuture<T>
+where
+    T: Send + Sync + 'static,
+{
+    pub(crate) fn new(inner: JobFuture<Box<dyn Any + Send + Sync>>) -> Self {
+        Self { inner, _marker: PhantomData }
+    }
+
+    /// Awaits the job's result, downcasting it back to `T`.
+    ///
+    /// If the job failed, this also unwraps [`AnyTaskError`](crate::task::AnyTaskError)
+    /// automatically, so the resulting `Error::TaskExecution`'s `source` field is the
+    /// original task's own concrete error, ready to downcast directly, the same as for
+    /// a non-erased task.
+    pub async fn result(&self) -> Result<T, Error> {
+        match self.inner.result().await {
+            Ok(boxed) => Ok(
+                // `enqueue_any`/`enqueue_fn` are the only constructors, and both fix `T`
+                // to the wrapped task's own `Output` type in the same statement that
+                // erases it, so this downcast cannot fail.
+                *boxed
+                    .downcast::<T>()
+                    .expect("unexpected type mismatch in result downcast"),
+            ),
+            Err(Error::TaskExecution { message, source }) => {
+                let source = source
+                    .downcast::<AnyTaskError>()
+                    .map(|wrapped| wrapped.into_inner())
+                    .unwrap_or_else(|source| source);
+
+                Err(Error::TaskExecution { message, source })
+            }
+            Err(other) => Err(other),
         }
     }
 }

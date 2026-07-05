@@ -1,11 +1,11 @@
 use futures::future::FutureExt;
-use std::{any::Any, marker::PhantomData, panic::AssertUnwindSafe, sync::Arc};
+use std::{any::Any, future::Future, marker::PhantomData, panic::AssertUnwindSafe, sync::Arc};
 
 use crate::{
     error::Error,
-    future::{JobFuture, JobFutureSetter},
+    future::{AnyJobFuture, JobFuture, JobFutureSetter},
     queue::{fifo::FifoQueue, lifo::LifoQueue, priority::PriorityQueue, traits::Queue},
-    task::Task,
+    task::{AnyTask, FnTask, Task},
 };
 
 /// Options for configuring a job in the job queue.
@@ -270,6 +270,39 @@ where
     }
 }
 
+impl<Q> JobQueue<AnyTask, Q>
+where
+    Q: Queue<Item = Job<AnyTask>>,
+{
+    /// Enqueues any [`Task`](crate::task::Task) onto a queue erased over
+    /// [`AnyTask`](crate::task::AnyTask), returning an
+    /// [`AnyJobFuture`](crate::future::AnyJobFuture) typed to that task's own `Output`,
+    /// so tasks with different concrete types and output types can share one queue while
+    /// callers keep a typed result.
+    pub async fn enqueue_any<T>(&self, task: T) -> Result<AnyJobFuture<T::Output>, Error>
+    where
+        T: Task + 'static,
+        T::Output: 'static,
+    {
+        Ok(AnyJobFuture::new(
+            self.enqueue_job(JobOptions::new(AnyTask::new(task)))
+                .await?,
+        ))
+    }
+
+    /// Enqueues an async closure as a [`Task`](crate::task::Task) on an erased queue.
+    /// See [`FnTask`](crate::task::FnTask).
+    pub async fn enqueue_fn<F, Fut, O, E>(&self, f: F) -> Result<AnyJobFuture<O>, Error>
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = std::result::Result<O, E>> + Send + 'static,
+        O: Send + Sync + 'static,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        self.enqueue_any(FnTask::new(f)).await
+    }
+}
+
 /// A builder for creating a [`JobQueue`](crate::job::JobQueue).
 pub struct JobQueueBuilder<T, Q>
 where
@@ -277,7 +310,7 @@ where
     Q: Queue<Item = Job<T>> + 'static,
 {
     queue: Option<Q>,
-    __marker: PhantomData<T>,
+    _marker: PhantomData<T>,
 }
 
 impl<T> JobQueueBuilder<T, FifoQueue<Job<T>>>
@@ -351,7 +384,7 @@ where
 {
     /// Creates a new [`JobQueueBuilder`](crate::job::JobQueueBuilder) instance.
     pub fn new() -> Self {
-        Self { queue: None, __marker: PhantomData }
+        Self { queue: None, _marker: PhantomData }
     }
 
     /// Builds a [`JobQueue`](crate::job::JobQueue) using the configured queue.

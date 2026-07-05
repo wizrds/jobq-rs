@@ -220,7 +220,7 @@ where
     W: Worker<T, Q> + 'static,
 {
     workers: Vec<Arc<W>>,
-    __marker: PhantomData<(T, Q)>,
+    _marker: PhantomData<(T, Q)>,
 }
 
 impl<T, Q, W> WorkerPool<T, Q, W>
@@ -237,7 +237,7 @@ where
     /// # Returns
     /// A new [`WorkerPool`](crate::worker::WorkerPool) instance.
     pub fn new(workers: Vec<Arc<W>>) -> Self {
-        Self { workers, __marker: PhantomData }
+        Self { workers, _marker: PhantomData }
     }
 
     /// Executes all workers in the pool concurrently.
@@ -320,7 +320,7 @@ where
     num_workers: usize,
     worker_options: Option<W::Options>,
     queue: Option<Arc<JobQueue<T, Q>>>,
-    __marker: PhantomData<(T, Q, W)>,
+    _marker: PhantomData<(T, Q, W)>,
 }
 
 impl<T, Q, W> Default for WorkerPoolBuilder<T, Q, W>
@@ -346,7 +346,7 @@ where
             num_workers: 1,
             worker_options: None,
             queue: None,
-            __marker: PhantomData,
+            _marker: PhantomData,
         }
     }
 
@@ -405,7 +405,7 @@ where
                     ))
                 })
                 .collect(),
-            __marker: PhantomData,
+            _marker: PhantomData,
         })
     }
 }

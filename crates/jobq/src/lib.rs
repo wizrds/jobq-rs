@@ -4,7 +4,7 @@ extern crate self as jobq;
 pub use jobq_core::{
     builder::{BatchJobQueueSystemBuilder, JobQueueSystemBuilder, QueueSystemBuilder},
     error::Error,
-    future::{JobFuture, JobFutureSet},
+    future::{AnyJobFuture, JobFuture, JobFutureSet},
     job::{Job, JobOptions, JobQueue, JobQueueBuilder, JobStatus},
     queue::{
         fifo::FifoQueue,
@@ -12,7 +12,7 @@ pub use jobq_core::{
         priority::{PriorityOptions, PriorityQueue},
         traits::Queue,
     },
-    task::Task,
+    task::{AnyTask, AnyTaskError, FnTask, Task},
     worker::{
         BatchJobWorker, BatchJobWorkerOptions, JobWorker, Worker, WorkerPool, WorkerPoolBuilder,
     },
