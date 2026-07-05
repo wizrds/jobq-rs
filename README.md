@@ -167,7 +167,7 @@ async fn main() {
 }
 ```
 
-A failing erased task's own error type is preserved too, exactly like a non-erased task's: `AnyTask::Error` is `Box<dyn std::error::Error + Send + Sync>`, so `Error::TaskExecution`'s `source` field can still be downcast back to whatever concrete error the original task produced.
+A failing erased task's own error type is preserved too, exactly like a non-erased task's: `AnyTask::Error` is `AnyTaskError`, a wrapper around the original task's own boxed error, and `.result()` unwraps it automatically, so `Error::TaskExecution`'s `source` field can still be downcast back to whatever concrete error the original task produced.
 
 ```rust
 match number_future.result().await {
