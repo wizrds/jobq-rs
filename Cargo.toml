@@ -1,5 +1,5 @@
 [workspace.package]
-version = "0.1.3"
+version = "0.2.0"
 edition = "2024"
 description = "Simple, in-memory async task queue for Rust."
 repository = "https://github.com/wizrds/jobq-rs"
