@@ -1,6 +1,12 @@
 # Changelog
 
 ---
+## [0.3.0](https://github.com/wizrds/jobq-rs/compare/0.2.0..0.3.0) - 2026-07-07
+
+### Features
+
+- Add support for streaming based tasks and rework generic type params to be simpler - ([ac46327](https://github.com/wizrds/jobq-rs/commit/ac46327ff892f911eb891a46259470fcd5661bd8)) - Timothy Pogue
+---
 ## [0.2.0](https://github.com/wizrds/jobq-rs/compare/0.1.3..0.2.0) - 2026-07-05
 
 ### Features
