@@ -7,10 +7,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-use crate::queue::{
-    error::Error,
-    traits::Queue,
-};
+use crate::queue::{error::Error, traits::Queue};
 
 /// A First In First Out (FIFO) queue implementation.
 #[derive(Debug)]
@@ -55,7 +52,11 @@ where
     type Item = T;
     type Options = ();
 
-    async fn enqueue(&self, item: Self::Item, _options: Option<Self::Options>) -> Result<(), Error> {
+    async fn enqueue(
+        &self,
+        item: Self::Item,
+        _options: Option<Self::Options>,
+    ) -> Result<(), Error> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::closed());
         }

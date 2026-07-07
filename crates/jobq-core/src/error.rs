@@ -36,10 +36,7 @@ impl Error {
     pub fn task_execution(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
         let source = error.into();
 
-        Self::TaskExecution {
-            message: source.to_string(),
-            source,
-        }
+        Self::TaskExecution { message: source.to_string(), source }
     }
 
     pub fn task_panic(message: impl Into<String>) -> Self {

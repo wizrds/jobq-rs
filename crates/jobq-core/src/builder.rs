@@ -1,69 +1,76 @@
 use std::sync::Arc;
 
 use crate::{
-    job::{Job, JobQueue, JobQueueBuilder},
+    executable::Executable,
+    job::{JobQueue, JobQueueBuilder},
     queue::{fifo::FifoQueue, lifo::LifoQueue, priority::PriorityQueue, traits::Queue},
-    task::Task,
     worker::{BatchJobWorker, JobWorker, Worker, WorkerPool, WorkerPoolBuilder},
 };
 
 /// A built job queue system: the [`JobQueue`](crate::job::JobQueue) paired with its [`WorkerPool`](crate::worker::WorkerPool).
-pub type QueueSystem<T, Q, W> = (Arc<JobQueue<T, Q>>, Arc<WorkerPool<T, Q, W>>);
+pub type QueueSystem<Q, W> = (Arc<JobQueue<Q>>, Arc<WorkerPool<Q, W>>);
 
 /// A builder for creating a complete job queue system.
-pub struct QueueSystemBuilder<T, Q, W>
+pub struct QueueSystemBuilder<Q, W>
 where
-    T: Task + 'static,
-    Q: Queue<Item = Job<T>> + 'static,
-    W: Worker<T, Q> + 'static,
+    Q: Queue<Item: Executable> + 'static,
+    W: Worker<Q> + 'static,
 {
-    job_queue_builder: JobQueueBuilder<T, Q>,
-    worker_pool_builder: WorkerPoolBuilder<T, Q, W>,
+    job_queue_builder: JobQueueBuilder<Q>,
+    worker_pool_builder: WorkerPoolBuilder<Q, W>,
 }
 
-impl<T, W> QueueSystemBuilder<T, FifoQueue<Job<T>>, W>
+impl<I, W> QueueSystemBuilder<FifoQueue<I>, W>
 where
-    T: Task + 'static,
-    W: Worker<T, FifoQueue<Job<T>>> + 'static,
+    I: Executable + 'static,
+    W: Worker<FifoQueue<I>> + 'static,
 {
     /// Creates a new [`QueueSystemBuilder`](crate::builder::QueueSystemBuilder) instance with a FIFO queue.
     pub fn fifo(max_capacity: usize) -> Self {
-        Self::new(JobQueueBuilder::new().fifo(max_capacity), WorkerPoolBuilder::new())
+        Self::new(
+            JobQueueBuilder::<FifoQueue<I>>::new().fifo(max_capacity),
+            WorkerPoolBuilder::new(),
+        )
     }
 }
 
-impl<T, W> QueueSystemBuilder<T, LifoQueue<Job<T>>, W>
+impl<I, W> QueueSystemBuilder<LifoQueue<I>, W>
 where
-    T: Task + 'static,
-    W: Worker<T, LifoQueue<Job<T>>> + 'static,
+    I: Executable + 'static,
+    W: Worker<LifoQueue<I>> + 'static,
 {
     /// Creates a new [`QueueSystemBuilder`](crate::builder::QueueSystemBuilder) instance with a LIFO queue.
     pub fn lifo(max_capacity: usize) -> Self {
-        Self::new(JobQueueBuilder::new().lifo(max_capacity), WorkerPoolBuilder::new())
+        Self::new(
+            JobQueueBuilder::<LifoQueue<I>>::new().lifo(max_capacity),
+            WorkerPoolBuilder::new(),
+        )
     }
 }
 
-impl<T, W> QueueSystemBuilder<T, PriorityQueue<Job<T>>, W>
+impl<I, W> QueueSystemBuilder<PriorityQueue<I>, W>
 where
-    T: Task + 'static,
-    W: Worker<T, PriorityQueue<Job<T>>> + 'static,
+    I: Executable + 'static,
+    W: Worker<PriorityQueue<I>> + 'static,
 {
     /// Creates a new [`QueueSystemBuilder`](crate::builder::QueueSystemBuilder) instance with a priority queue.
     pub fn priority(max_capacity: usize) -> Self {
-        Self::new(JobQueueBuilder::new().priority(max_capacity), WorkerPoolBuilder::new())
+        Self::new(
+            JobQueueBuilder::<PriorityQueue<I>>::new().priority(max_capacity),
+            WorkerPoolBuilder::new(),
+        )
     }
 }
 
-impl<T, Q, W> QueueSystemBuilder<T, Q, W>
+impl<Q, W> QueueSystemBuilder<Q, W>
 where
-    T: Task + 'static,
-    Q: Queue<Item = Job<T>> + 'static,
-    W: Worker<T, Q> + 'static,
+    Q: Queue<Item: Executable> + 'static,
+    W: Worker<Q> + 'static,
 {
     /// Creates a new [`QueueSystemBuilder`](crate::builder::QueueSystemBuilder) instance.
     pub fn new(
-        job_queue_builder: JobQueueBuilder<T, Q>,
-        worker_pool_builder: WorkerPoolBuilder<T, Q, W>,
+        job_queue_builder: JobQueueBuilder<Q>,
+        worker_pool_builder: WorkerPoolBuilder<Q, W>,
     ) -> Self {
         Self { job_queue_builder, worker_pool_builder }
     }
@@ -79,6 +86,7 @@ where
         self.worker_pool_builder = self
             .worker_pool_builder
             .with_num_workers(num_workers);
+
         self
     }
 
@@ -93,6 +101,7 @@ where
         self.worker_pool_builder = self
             .worker_pool_builder
             .with_options(options);
+
         self
     }
 
@@ -100,20 +109,21 @@ where
     ///
     /// # Returns
     /// A tuple containing the job queue and the worker pool.
-    pub fn build(self) -> QueueSystem<T, Q, W> {
+    pub fn build(self) -> QueueSystem<Q, W> {
         let job_queue = self.job_queue_builder.build();
         let worker_pool = self
             .worker_pool_builder
             .with_queue(job_queue.clone())
             .build();
+
         (job_queue, worker_pool)
     }
 }
 
 /// A type alias for a job queue system builder using the [`JobWorker`](crate::worker::JobWorker)
 /// as the worker type.
-pub type JobQueueSystemBuilder<T, Q> = QueueSystemBuilder<T, Q, JobWorker<T, Q>>;
+pub type JobQueueSystemBuilder<Q> = QueueSystemBuilder<Q, JobWorker<Q>>;
 
 /// A type alias for a job queue system builder using the [`BatchJobWorker`](crate::worker::BatchJobWorker)
 /// as the worker type.
-pub type BatchJobQueueSystemBuilder<T, Q> = QueueSystemBuilder<T, Q, BatchJobWorker<T, Q>>;
+pub type BatchJobQueueSystemBuilder<Q> = QueueSystemBuilder<Q, BatchJobWorker<Q>>;

@@ -3,6 +3,7 @@ extern crate self as jobq_core;
 
 pub mod builder;
 pub mod error;
+pub mod executable;
 pub mod future;
 pub mod job;
 pub mod queue;

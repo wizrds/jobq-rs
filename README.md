@@ -2,15 +2,17 @@
 
 ## Overview
 
-JobQ is a lightweight, in-memory job queue implementation in Rust designed for asynchronous task processing within the same process. It allows for simple job scheduling and processing, suitable for applications that require asynchronous task handling without the need for distributed messaging systems.
+JobQ is a lightweight, in-memory job queue for asynchronous work inside a single
+process. It supports both ordinary tasks that produce one final result and
+streaming tasks that yield items over time while workers drive the underlying
+work.
 
 ## Features
 
-- **Simple API**: Easy-to-use functions for creating jobs and processing them.
-- **Concurrency Safe**: Safely handles multiple concurrent job enqueuers and workers.
-- **Retry Logic**: Supports retry logic for jobs.
-- **Future Results**: Implements a Future pattern for job results, allowing asynchronous result retrieval, or fire-and-forget job execution.
-
+- **Simple API**: enqueue ordinary tasks or streaming tasks on the same worker pool.
+- **Concurrency safe**: safely handles multiple concurrent enqueuers and workers.
+- **Retry logic**: supports retries for ordinary tasks.
+- **Live streaming**: supports worker-driven streams of items produced over time.
 
 ## Installation
 
@@ -20,19 +22,19 @@ cargo add jobq --git https://github.com/wizrds/jobq-rs.git
 
 ## Usage
 
-### Basic Concepts
+### Basic concepts
 
-- **Job**: A unit of work that needs to be executed.
-- **Task**: An interface that your work units must implement.
-- **JobFuture**: A mechanism to retrieve the result of a job asynchronously.
-- **JobQueue**: A queue that holds and manages the jobs.
-- **Worker**: A worker that processes jobs from the queue.
-- **WorkerPool**: A pool of workers that execute jobs from the queue.
+- **Task**: an async unit of work that returns one final result.
+- **StreamTask**: a task that yields many items over time.
+- **JobFuture**: a handle for awaiting an ordinary task's final result.
+- **StreamHandle**: a live stream of produced items, plus a `result()` for the outcome.
+- **JobQueue**: a queue that stores executable jobs.
+- **Worker**: a worker that dequeues and runs jobs.
+- **WorkerPool**: a pool of workers that execute jobs concurrently.
 
+### Creating a task
 
-### Creating a Task
-
-Implement the `Task` interface for the work you want to perform:
+Implement `Task` for work that produces one final result:
 
 ```rust
 use jobq::Task;
@@ -60,87 +62,69 @@ impl Task for MyTask {
 }
 ```
 
-A task's `Error` type must implement `std::error::Error`, which is what `#[derive(thiserror::Error)]` provides above (add `thiserror` to your own `Cargo.toml` for this, or implement `std::error::Error` by hand if you would rather not take the dependency).
+A task's `Error` type must implement `std::error::Error`. If a task panics, the
+panic is caught and surfaced as `Error::TaskPanic` rather than taking down the
+worker. A panic fails the job immediately and is never retried.
 
-If a task's `execute` method panics, the panic is caught and surfaced as a failed job result (`Error::TaskPanic`) rather than taking down the worker. A panic fails the job immediately and is never retried. Note that tasks should avoid panicking while holding shared invariants (for example, data behind interior mutability shared with other tasks), since the catch boundary cannot guarantee such state is left in a consistent state.
-
-### Creating a JobQueue and enqueueing a Job
+### Creating a job queue and enqueueing a job
 
 ```rust
-use jobq::{Error, JobOptions, JobQueueSystemBuilder, Task};
-
+use jobq::{JobQueueSystemBuilder, Error, JobOptions, Task};
 
 #[tokio::main]
 async fn main() {
-    // Create a JobQueue with a FIFO queue implementation with a max capacity of 10 and a WorkerPool to process jobs,
-    // with 2 workers.
-    let (job_queue, worker_pool) = JobQueueSystemBuilder::<MyTask, _>::fifo(10)
+    let (job_queue, worker_pool) = JobQueueSystemBuilder::fifo(10)
         .with_num_workers(2)
         .build();
 
-    // Use the `BatchJobQueueSystemBuilder` to create a JobQueue with a worker that processes jobs in batches.
-    // let (job_queue, worker_pool) = BatchJobQueueSystemBuilder::<MyTask, _>::fifo(10)
-    //     .with_num_workers(2)
-    //     .with_worker_options(BatchJobWorkerOptions {
-    //         batch_size: 3,
-    //         batch_timeout: std::time::Duration::from_millis(10),
-    //     })
-    //     .build();
-
-    // Start the worker pool `run` method in a separate task.
     let worker_pool_clone = worker_pool.clone();
     let handle = tokio::spawn(async move {
         worker_pool_clone.run().await;
     });
 
-    // Enqueueing the job returns a JobFuture which can be used to retrieve the result later,
-    // or it can be ignored if you need to fire-and-forget the job.
     let future = job_queue
-        .enqueue_job(
-            JobOptions::new(MyTask { n: 42 })
-                .with_max_retries(3)
-        )
+        .enqueue_job(JobOptions::new(MyTask { n: 42 }).with_max_retries(3))
         .await
         .unwrap();
 
-    // Wait for the job to complete and retrieve the result. A task's own error type
-    // is preserved through `Error::TaskExecution`'s `source` field, so it can be
-    // downcast back to the concrete type the task itself produced.
     match future.result().await {
-        Ok(result) => println!("Job completed with result: {}", result),
+        Ok(result) => println!("Job completed with result: {result}"),
         Err(Error::TaskExecution { source, .. }) => {
             if let Some(original) = source.downcast_ref::<MyTaskError>() {
                 println!("Task failed with its own error type: {original}");
             }
         }
-        Err(e) => println!("Job failed with error: {}", e),
-    };
+        Err(error) => println!("Job failed with error: {error}"),
+    }
 
-    // Shutdown the worker pool gracefully
     worker_pool.shutdown().await;
-    // Wait for the worker pool to finish processing all jobs
     handle.await.unwrap();
 }
 ```
 
+Use `BatchJobQueueSystemBuilder` instead of `JobQueueSystemBuilder` for a worker
+pool that processes jobs in batches.
+
 ### Queue implementations
 
-JobQ provides two queue implementations:
+JobQ provides three queue implementations:
 
-- **FIFOQueue**: A FIFO queue that holds jobs in the order they were enqueued.
-- **LIFOQueue**: A LIFO queue that holds jobs in the reverse order they were enqueued.
-- **PriorityQueue**: A priority queue that holds jobs in priority order. Jobs with a lower priority value will be processed first. Defining the priority is done in the `PriorityOptions` when enqueuing a job. This can be set via the `with_queue_options` method on the `JobOptions` struct.
+- **FifoQueue**: jobs are processed in the order they were enqueued.
+- **LifoQueue**: jobs are processed in reverse enqueue order.
+- **PriorityQueue**: jobs are processed by priority. Lower numeric priority values
+  are processed first.
 
-### Dynamic dispatch
+### Shared erased queue
 
-Every `JobQueue<T, Q>` normally accepts only one concrete `Task` type `T`. If you would rather run several unrelated kinds of work through a single pool of workers, build a queue over `AnyTask` instead, then use `enqueue_any` (for any `Task` implementation) or `enqueue_fn` (for a one-off async closure) to enqueue whatever you like. Each call still returns a future typed to that specific task's own output, even though the queue itself only ever stores one erased representation internally.
+Build a `JobQueueSystemBuilder` when you want one queue to carry several
+unrelated ordinary task types through the same worker pool:
 
 ```rust
-use jobq::{AnyTask, Error, JobQueueSystemBuilder, Task};
+use jobq::{JobQueueSystemBuilder, JobOptions, Task};
 
 #[tokio::main]
 async fn main() {
-    let (job_queue, worker_pool) = JobQueueSystemBuilder::<AnyTask, _>::fifo(10)
+    let (job_queue, worker_pool) = JobQueueSystemBuilder::fifo(10)
         .with_num_workers(2)
         .build();
 
@@ -149,11 +133,10 @@ async fn main() {
         worker_pool_clone.run().await;
     });
 
-    // MyTask is the same task type shown above; its output type, u32, still flows
-    // through to `.result()` even though the queue itself only stores erased tasks.
-    let number_future = job_queue.enqueue_any(MyTask { n: 21 }).await.unwrap();
-
-    // enqueue_fn wraps a closure as a task without a hand-written struct.
+    let number_future = job_queue
+        .enqueue_job(JobOptions::new(MyTask { n: 21 }))
+        .await
+        .unwrap();
     let string_future = job_queue
         .enqueue_fn(|| async { Ok::<String, MyTaskError>("hello!".to_string()) })
         .await
@@ -167,25 +150,69 @@ async fn main() {
 }
 ```
 
-A failing erased task's own error type is preserved too, exactly like a non-erased task's: `AnyTask::Error` is `AnyTaskError`, a wrapper around the original task's own boxed error, and `.result()` unwraps it automatically, so `Error::TaskExecution`'s `source` field can still be downcast back to whatever concrete error the original task produced.
+Each enqueue call still returns a fully typed future for that specific task's own
+output.
+
+### Streaming tasks
+
+Implement `StreamTask` for work that produces items over time:
 
 ```rust
-match number_future.result().await {
-    Err(Error::TaskExecution { source, .. }) => {
-        if let Some(original) = source.downcast_ref::<MyTaskError>() {
-            println!("Task failed with its own error type: {original}");
-        }
+use futures::{stream, StreamExt};
+use jobq::{JobQueueSystemBuilder, JobStreamOptions, StreamTask};
+
+#[derive(Debug, thiserror::Error)]
+#[error("stream failed")]
+pub struct MyStreamError;
+
+pub struct MyStreamTask;
+
+impl StreamTask for MyStreamTask {
+    type Item = u32;
+    type Error = MyStreamError;
+
+    fn execute(
+        &self,
+    ) -> futures::stream::BoxStream<'_, Result<Self::Item, Self::Error>> {
+        stream::iter(vec![Ok(1), Ok(2), Ok(3)]).boxed()
     }
-    _ => {}
+}
+
+#[tokio::main]
+async fn main() {
+    let (job_queue, worker_pool) = JobQueueSystemBuilder::fifo(10)
+        .with_num_workers(2)
+        .build();
+
+    let worker_pool_clone = worker_pool.clone();
+    let handle = tokio::spawn(async move {
+        worker_pool_clone.run().await;
+    });
+
+    let mut stream_handle = job_queue
+        .enqueue_stream(JobStreamOptions::new(MyStreamTask).with_capacity(16))
+        .await
+        .unwrap();
+
+    while let Some(item) = stream_handle.next().await {
+        println!("item: {item:?}");
+    }
+
+    stream_handle.result().await.unwrap();
+
+    worker_pool.shutdown().await;
+    handle.await.unwrap();
 }
 ```
 
-`enqueue_any` and `enqueue_fn` always use the same defaults as `JobOptions::new(..)` (a single attempt, no queue options). If you need retries or queue options for an erased task, call the lower-level `enqueue_job` directly: `job_queue.enqueue_job(JobOptions::new(AnyTask::new(MyTask { n: 21 })).with_max_retries(3)).await`.
+The worker polls the underlying stream. The caller only consumes already-produced
+items by iterating the `JobStreamHandle` directly, then awaits `JobStreamHandle::result`
+for the terminal outcome.
 
 ## License
-This project is licensed under ISC License.
 
-## Support & Feedback
+This project is licensed under the ISC License.
+
+## Support and feedback
+
 If you encounter any issues or have feedback, please open an issue.
-
-Made with ❤️ by Tim Pogue

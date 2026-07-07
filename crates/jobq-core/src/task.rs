@@ -1,6 +1,10 @@
-use std::{any::Any, fmt, future::Future, marker::PhantomData};
+use std::{future::Future, marker::PhantomData};
 
 use async_trait::async_trait;
+use futures::{
+    StreamExt,
+    stream::{BoxStream, Stream},
+};
 
 /// Trait representing a task that can be executed by the job queue.
 ///
@@ -12,90 +16,6 @@ pub trait Task: Send + Sync {
     type Error: std::error::Error + Send + Sync + 'static;
 
     async fn execute(&self) -> Result<Self::Output, Self::Error>;
-}
-
-/// The error type of an [`AnyTask`](crate::task::AnyTask): a `Sized` wrapper around the
-/// original task's own boxed error.
-#[derive(Debug)]
-pub struct AnyTaskError(Box<dyn std::error::Error + Send + Sync>);
-
-impl AnyTaskError {
-    pub fn new<E>(error: E) -> Self
-    where
-        E: std::error::Error + Send + Sync + 'static,
-    {
-        Self(Box::new(error))
-    }
-
-    /// Attempts to downcast the wrapped error back to its original concrete type.
-    pub fn downcast_ref<E: std::error::Error + 'static>(&self) -> Option<&E> {
-        self.0.downcast_ref::<E>()
-    }
-
-    /// Consumes the wrapper, returning the original boxed error.
-    pub fn into_inner(self) -> Box<dyn std::error::Error + Send + Sync> {
-        self.0
-    }
-}
-
-impl fmt::Display for AnyTaskError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.0, f)
-    }
-}
-
-impl std::error::Error for AnyTaskError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.0.source()
-    }
-}
-
-// Object-safe counterpart of `Task` so `AnyTask` can store any concrete `Task` behind one boxed trait object.
-#[async_trait]
-trait ErasedTask: Send + Sync {
-    async fn execute_erased(&self) -> Result<Box<dyn Any + Send + Sync>, AnyTaskError>;
-}
-
-#[async_trait]
-impl<T> ErasedTask for T
-where
-    T: Task + 'static,
-    T::Output: 'static,
-{
-    async fn execute_erased(&self) -> Result<Box<dyn Any + Send + Sync>, AnyTaskError> {
-        self.execute()
-            .await
-            .map(|output| Box::new(output) as Box<dyn Any + Send + Sync>)
-            .map_err(AnyTaskError::new)
-    }
-}
-
-/// A type-erased [`Task`](crate::task::Task) that can share a queue with tasks of other,
-/// unrelated concrete types and output types.
-pub struct AnyTask {
-    inner: Box<dyn ErasedTask>,
-}
-
-impl AnyTask {
-    /// Erases a concrete [`Task`](crate::task::Task) so it can share a queue with
-    /// tasks of other, unrelated concrete types and output types.
-    pub fn new<T>(task: T) -> Self
-    where
-        T: Task + 'static,
-        T::Output: 'static,
-    {
-        Self { inner: Box::new(task) }
-    }
-}
-
-#[async_trait]
-impl Task for AnyTask {
-    type Output = Box<dyn Any + Send + Sync>;
-    type Error = AnyTaskError;
-
-    async fn execute(&self) -> Result<Self::Output, Self::Error> {
-        self.inner.execute_erased().await
-    }
 }
 
 /// Wraps a closure as a [`Task`](crate::task::Task) without requiring a hand-written
@@ -128,10 +48,49 @@ where
     }
 }
 
+/// Trait representing a task that produces a stream of items driven inside the worker.
+///
+/// A streaming task is never retried.
+pub trait StreamTask: Send + Sync {
+    type Item: Send + Sync + 'static;
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    fn execute(&self) -> BoxStream<'_, Result<Self::Item, Self::Error>>;
+}
+
+/// Wraps a closure returning a [`Stream`](futures::Stream) as a
+/// [`StreamTask`](crate::task::StreamTask) without a hand-written struct.
+pub struct FnStreamTask<F, St> {
+    f: F,
+    _marker: PhantomData<fn() -> St>,
+}
+
+impl<F, St> FnStreamTask<F, St> {
+    /// Wraps a closure as a [`StreamTask`](crate::task::StreamTask).
+    pub fn new(f: F) -> Self {
+        Self { f, _marker: PhantomData }
+    }
+}
+
+impl<F, St, Item, E> StreamTask for FnStreamTask<F, St>
+where
+    F: Fn() -> St + Send + Sync,
+    St: Stream<Item = Result<Item, E>> + Send + 'static,
+    Item: Send + Sync + 'static,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    type Item = Item;
+    type Error = E;
+
+    fn execute(&self) -> BoxStream<'_, Result<Item, E>> {
+        (self.f)().boxed()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{builder::JobQueueSystemBuilder, error::Error};
+    use crate::{builder::JobQueueSystemBuilder, error::Error, job::JobOptions};
 
     #[derive(Debug, thiserror::Error)]
     #[error("cannot double zero")]
@@ -171,7 +130,7 @@ mod tests {
 
     #[tokio::test]
     async fn heterogeneous_outputs_share_one_queue() {
-        let (queue, worker_pool) = JobQueueSystemBuilder::<AnyTask, _>::fifo(10)
+        let (queue, worker_pool) = JobQueueSystemBuilder::fifo(10)
             .with_num_workers(2)
             .build();
 
@@ -181,11 +140,11 @@ mod tests {
         });
 
         let number_future = queue
-            .enqueue_any(DoubleTask { n: 21 })
+            .enqueue_job(JobOptions::new(DoubleTask { n: 21 }))
             .await
             .unwrap();
         let string_future = queue
-            .enqueue_any(ShoutTask { message: "hello".to_string() })
+            .enqueue_job(JobOptions::new(ShoutTask { message: "hello".to_string() }))
             .await
             .unwrap();
 
@@ -198,7 +157,7 @@ mod tests {
 
     #[tokio::test]
     async fn enqueue_fn_runs_a_closure() {
-        let (queue, worker_pool) = JobQueueSystemBuilder::<AnyTask, _>::fifo(10)
+        let (queue, worker_pool) = JobQueueSystemBuilder::fifo(10)
             .with_num_workers(1)
             .build();
 
@@ -236,7 +195,7 @@ mod tests {
             }
         }
 
-        let (queue, worker_pool) = JobQueueSystemBuilder::<AnyTask, _>::fifo(10)
+        let (queue, worker_pool) = JobQueueSystemBuilder::fifo(10)
             .with_num_workers(1)
             .build();
 
@@ -246,7 +205,7 @@ mod tests {
         });
 
         let future = queue
-            .enqueue_any(FailingTask)
+            .enqueue_job(JobOptions::new(FailingTask))
             .await
             .unwrap();
 

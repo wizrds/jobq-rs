@@ -1,21 +1,23 @@
 use futures::{
+    SinkExt, Stream,
+    channel::mpsc,
     channel::oneshot::{Receiver, Sender, channel},
     future::{BoxFuture, join_all, try_join_all},
 };
 use mea::mutex::Mutex;
 use std::{
-    any::Any,
     future::IntoFuture,
     iter::FromIterator,
-    marker::PhantomData,
     ops::{Deref, DerefMut},
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    task::{Context, Poll},
 };
 
-use crate::{error::Error, task::AnyTaskError};
+use crate::error::Error;
 
 /// Represents a future that can be awaited to get the result of a [`Job`](crate::job::Job).
 pub struct JobFuture<T>
@@ -78,7 +80,9 @@ where
     pub async fn close(&self) {
         let mut inner = self.inner.lock().await;
 
-        inner.closed.store(true, Ordering::SeqCst);
+        inner
+            .closed
+            .store(true, Ordering::SeqCst);
         inner.receiver.take(); // Drop the receiver to prevent further awaits
         inner.result.take(); // Clear any existing result
     }
@@ -130,48 +134,95 @@ where
     }
 }
 
-/// A [`JobFuture`](crate::future::JobFuture) for a job whose task was erased via
-/// [`AnyTask`](crate::task::AnyTask), downcasting the erased result back to the concrete
-/// output type known at the call site that erased it.
-pub struct AnyJobFuture<T> {
-    inner: JobFuture<Box<dyn Any + Send + Sync>>,
-    _marker: PhantomData<T>,
+/// A stream of items produced by a streaming job.
+pub struct JobStream<T>
+where
+    T: Send + Sync,
+{
+    receiver: mpsc::Receiver<Result<T, Error>>,
 }
 
-impl<T> AnyJobFuture<T>
+impl<T> JobStream<T>
+where
+    T: Send + Sync,
+{
+    /// Creates a bounded stream and its setter with the given channel capacity.
+    pub fn new(capacity: usize) -> (Self, JobStreamSetter<T>) {
+        let (sender, receiver) = mpsc::channel(capacity);
+
+        (Self { receiver }, JobStreamSetter { sender })
+    }
+}
+
+impl<T> Stream for JobStream<T>
+where
+    T: Send + Sync,
+{
+    type Item = Result<T, Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.receiver).poll_next(cx)
+    }
+}
+
+/// Sends the items produced by a streaming job to its [`JobStream`].
+pub struct JobStreamSetter<T>
+where
+    T: Send + Sync,
+{
+    sender: mpsc::Sender<Result<T, Error>>,
+}
+
+impl<T> JobStreamSetter<T>
+where
+    T: Send + Sync,
+{
+    /// Sends one item to the [`JobStream`], awaiting if the channel is full.
+    pub async fn send(&mut self, item: Result<T, Error>) -> Result<(), Error> {
+        self.sender
+            .send(item)
+            .await
+            .map_err(|_| Error::future_closed())
+    }
+}
+
+/// The consumer handle for a streaming job: a [`Stream`] of produced items, plus a
+/// [`result`](JobStreamHandle::result) for the terminal outcome.
+pub struct JobStreamHandle<T>
 where
     T: Send + Sync + 'static,
 {
-    pub(crate) fn new(inner: JobFuture<Box<dyn Any + Send + Sync>>) -> Self {
-        Self { inner, _marker: PhantomData }
+    items: JobStream<T>,
+    result: JobFuture<()>,
+}
+
+impl<T> JobStreamHandle<T>
+where
+    T: Send + Sync + 'static,
+{
+    pub(crate) fn new(items: JobStream<T>, result: JobFuture<()>) -> Self {
+        Self { items, result }
     }
 
-    /// Awaits the job's result, downcasting it back to `T`.
-    ///
-    /// If the job failed, this also unwraps [`AnyTaskError`](crate::task::AnyTaskError)
-    /// automatically, so the resulting `Error::TaskExecution`'s `source` field is the
-    /// original task's own concrete error, ready to downcast directly, the same as for
-    /// a non-erased task.
-    pub async fn result(&self) -> Result<T, Error> {
-        match self.inner.result().await {
-            Ok(boxed) => Ok(
-                // `enqueue_any`/`enqueue_fn` are the only constructors, and both fix `T`
-                // to the wrapped task's own `Output` type in the same statement that
-                // erases it, so this downcast cannot fail.
-                *boxed
-                    .downcast::<T>()
-                    .expect("unexpected type mismatch in result downcast"),
-            ),
-            Err(Error::TaskExecution { message, source }) => {
-                let source = source
-                    .downcast::<AnyTaskError>()
-                    .map(|wrapped| wrapped.into_inner())
-                    .unwrap_or_else(|source| source);
+    /// Awaits the terminal outcome of the stream.
+    pub async fn result(&self) -> Result<(), Error> {
+        self.result.result().await
+    }
 
-                Err(Error::TaskExecution { message, source })
-            }
-            Err(other) => Err(other),
-        }
+    /// Splits the handle into its item stream and terminal future.
+    pub fn split(self) -> (JobStream<T>, JobFuture<()>) {
+        (self.items, self.result)
+    }
+}
+
+impl<T> Stream for JobStreamHandle<T>
+where
+    T: Send + Sync + 'static,
+{
+    type Item = Result<T, Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.items).poll_next(cx)
     }
 }
 

@@ -7,18 +7,13 @@ use futures::{
 use futures_timeout::TimeoutExt;
 use std::{marker::PhantomData, sync::Arc, time::Duration};
 
-use crate::{
-    job::{Job, JobQueue},
-    queue::traits::Queue,
-    task::Task,
-};
+use crate::{executable::Executable, job::JobQueue, queue::traits::Queue};
 
 /// Trait for defining a worker that processes jobs from a job queue.
 #[async_trait]
-pub trait Worker<T, Q>: Send + Sync
+pub trait Worker<Q>: Send + Sync
 where
-    T: Task + 'static,
-    Q: Queue<Item = Job<T>> + 'static,
+    Q: Queue<Item: Executable> + 'static,
 {
     type Options: Default + Clone + Send + Sync + 'static;
 
@@ -34,7 +29,7 @@ where
     ///
     /// # Returns
     /// A new worker instance.
-    fn create(id: usize, queue: Arc<JobQueue<T, Q>>, options: Self::Options) -> Self
+    fn create(id: usize, queue: Arc<JobQueue<Q>>, options: Self::Options) -> Self
     where
         Self: Sized;
 
@@ -47,21 +42,19 @@ where
 
 /// A worker that processes jobs one at a time from a job queue.
 #[derive(Debug)]
-pub struct JobWorker<T, Q>
+pub struct JobWorker<Q>
 where
-    T: Task,
-    Q: Queue<Item = Job<T>>,
+    Q: Queue<Item: Executable>,
 {
     id: usize,
-    queue: Arc<JobQueue<T, Q>>,
+    queue: Arc<JobQueue<Q>>,
     shutdown: Arc<Event>,
 }
 
 #[async_trait]
-impl<T, Q> Worker<T, Q> for JobWorker<T, Q>
+impl<Q> Worker<Q> for JobWorker<Q>
 where
-    T: Task + 'static,
-    Q: Queue<Item = Job<T>> + 'static,
+    Q: Queue<Item: Executable> + 'static,
 {
     type Options = ();
 
@@ -69,7 +62,7 @@ where
         self.id
     }
 
-    fn create(id: usize, queue: Arc<JobQueue<T, Q>>, _options: Self::Options) -> Self {
+    fn create(id: usize, queue: Arc<JobQueue<Q>>, _options: Self::Options) -> Self {
         Self {
             id,
             queue,
@@ -117,21 +110,19 @@ impl Default for BatchJobWorkerOptions {
 
 /// A worker that processes jobs in batches from a [`JobQueue`](crate::job::JobQueue).
 #[derive(Debug)]
-pub struct BatchJobWorker<T, Q>
+pub struct BatchJobWorker<Q>
 where
-    T: Task,
-    Q: Queue<Item = Job<T>>,
+    Q: Queue<Item: Executable>,
 {
     id: usize,
-    queue: Arc<JobQueue<T, Q>>,
+    queue: Arc<JobQueue<Q>>,
     options: BatchJobWorkerOptions,
     shutdown: Arc<Event>,
 }
 
-impl<T, Q> BatchJobWorker<T, Q>
+impl<Q> BatchJobWorker<Q>
 where
-    T: Task + 'static,
-    Q: Queue<Item = Job<T>> + 'static,
+    Q: Queue<Item: Executable> + 'static,
 {
     /// Creates a new [`BatchJobWorker`](crate::worker::BatchJobWorker) instance.
     ///
@@ -139,7 +130,7 @@ where
     /// * `id` - The unique identifier for the worker.
     /// * `queue` - The job queue from which the worker will dequeue jobs.
     /// * `options` - Options for configuring the batch processing behavior.
-    pub fn new(id: usize, queue: Arc<JobQueue<T, Q>>, options: BatchJobWorkerOptions) -> Self {
+    pub fn new(id: usize, queue: Arc<JobQueue<Q>>, options: BatchJobWorkerOptions) -> Self {
         Self {
             id,
             queue,
@@ -149,7 +140,7 @@ where
     }
 
     /// Collects a batch of jobs from the queue.
-    async fn collect_batch(&self, batch_size: usize, batch_timeout: Duration) -> Vec<Job<T>> {
+    async fn collect_batch(&self, batch_size: usize, batch_timeout: Duration) -> Vec<Q::Item> {
         let mut jobs = Vec::with_capacity(batch_size);
 
         while jobs.len() < batch_size {
@@ -171,10 +162,9 @@ where
 }
 
 #[async_trait]
-impl<T, Q> Worker<T, Q> for BatchJobWorker<T, Q>
+impl<Q> Worker<Q> for BatchJobWorker<Q>
 where
-    T: Task + 'static,
-    Q: Queue<Item = Job<T>> + 'static,
+    Q: Queue<Item: Executable> + 'static,
 {
     type Options = BatchJobWorkerOptions;
 
@@ -182,7 +172,7 @@ where
         self.id
     }
 
-    fn create(id: usize, queue: Arc<JobQueue<T, Q>>, options: Self::Options) -> Self {
+    fn create(id: usize, queue: Arc<JobQueue<Q>>, options: Self::Options) -> Self {
         Self::new(id, queue, options)
     }
 
@@ -213,21 +203,19 @@ where
 
 /// A worker pool that manages multiple workers processing jobs from a job queue.
 #[derive(Debug)]
-pub struct WorkerPool<T, Q, W>
+pub struct WorkerPool<Q, W>
 where
-    T: Task + 'static,
-    Q: Queue<Item = Job<T>> + 'static,
-    W: Worker<T, Q> + 'static,
+    Q: Queue<Item: Executable> + 'static,
+    W: Worker<Q> + 'static,
 {
     workers: Vec<Arc<W>>,
-    _marker: PhantomData<(T, Q)>,
+    _marker: PhantomData<Q>,
 }
 
-impl<T, Q, W> WorkerPool<T, Q, W>
+impl<Q, W> WorkerPool<Q, W>
 where
-    T: Task + 'static,
-    Q: Queue<Item = Job<T>> + 'static,
-    W: Worker<T, Q> + 'static,
+    Q: Queue<Item: Executable> + 'static,
+    W: Worker<Q> + 'static,
 {
     /// Creates a new [`WorkerPool`](crate::worker::WorkerPool) instance with the specified workers.
     ///
@@ -303,42 +291,39 @@ where
     }
 
     /// Get a [`WorkerPoolBuilder`](crate::worker::WorkerPoolBuilder) for creating a [`WorkerPool`](crate::worker::WorkerPool)
-    /// with the specified task and queue types.
-    pub fn builder() -> WorkerPoolBuilder<T, Q, W> {
+    /// with the specified queue and worker types.
+    pub fn builder() -> WorkerPoolBuilder<Q, W> {
         WorkerPoolBuilder::new()
     }
 }
 
 /// A builder for creating a [`WorkerPool`](crate::worker::WorkerPool).
 #[derive(Debug)]
-pub struct WorkerPoolBuilder<T, Q, W>
+pub struct WorkerPoolBuilder<Q, W>
 where
-    T: Task + 'static,
-    Q: Queue<Item = Job<T>> + 'static,
-    W: Worker<T, Q> + 'static,
+    Q: Queue<Item: Executable> + 'static,
+    W: Worker<Q> + 'static,
 {
     num_workers: usize,
     worker_options: Option<W::Options>,
-    queue: Option<Arc<JobQueue<T, Q>>>,
-    _marker: PhantomData<(T, Q, W)>,
+    queue: Option<Arc<JobQueue<Q>>>,
+    _marker: PhantomData<(Q, W)>,
 }
 
-impl<T, Q, W> Default for WorkerPoolBuilder<T, Q, W>
+impl<Q, W> Default for WorkerPoolBuilder<Q, W>
 where
-    T: Task + 'static,
-    Q: Queue<Item = Job<T>> + 'static,
-    W: Worker<T, Q> + 'static,
+    Q: Queue<Item: Executable> + 'static,
+    W: Worker<Q> + 'static,
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T, Q, W> WorkerPoolBuilder<T, Q, W>
+impl<Q, W> WorkerPoolBuilder<Q, W>
 where
-    T: Task + 'static,
-    Q: Queue<Item = Job<T>> + 'static,
-    W: Worker<T, Q> + 'static,
+    Q: Queue<Item: Executable> + 'static,
+    W: Worker<Q> + 'static,
 {
     /// Creates a new [`WorkerPoolBuilder`](crate::worker::WorkerPoolBuilder) instance.
     pub fn new() -> Self {
@@ -381,7 +366,7 @@ where
     ///
     /// # Returns
     /// A mutable reference to the builder instance for method chaining.
-    pub fn with_queue(mut self, queue: Arc<JobQueue<T, Q>>) -> Self {
+    pub fn with_queue(mut self, queue: Arc<JobQueue<Q>>) -> Self {
         self.queue = Some(queue);
         self
     }
@@ -390,7 +375,7 @@ where
     ///
     /// # Returns
     /// A new [`WorkerPool`](crate::worker::WorkerPool) instance wrapped in `Arc` containing the configured workers.
-    pub fn build(self) -> Arc<WorkerPool<T, Q, W>> {
+    pub fn build(self) -> Arc<WorkerPool<Q, W>> {
         Arc::new(WorkerPool {
             workers: (0..self.num_workers)
                 .map(|id| {

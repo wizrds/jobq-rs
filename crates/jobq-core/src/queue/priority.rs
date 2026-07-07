@@ -10,10 +10,7 @@ use std::{
     },
 };
 
-use crate::queue::{
-    error::Error,
-    traits::Queue,
-};
+use crate::queue::{error::Error, traits::Queue};
 
 /// Wrapper for items with priority
 #[derive(Debug)]
