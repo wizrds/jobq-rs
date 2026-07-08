@@ -1,6 +1,12 @@
 # Changelog
 
 ---
+## [0.3.1](https://github.com/wizrds/jobq-rs/compare/0.3.0..0.3.1) - 2026-07-08
+
+### Bug Fixes
+
+- Add concrete wrapper around erased executables to avoid send and async_trait issues in downstream apps - ([149cf92](https://github.com/wizrds/jobq-rs/commit/149cf926bc3ff7ce39e000bebc391efff0c69691)) - Timothy Pogue
+---
 ## [0.3.0](https://github.com/wizrds/jobq-rs/compare/0.2.0..0.3.0) - 2026-07-07
 
 ### Features
