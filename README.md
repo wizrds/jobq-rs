@@ -114,45 +114,6 @@ JobQ provides three queue implementations:
 - **PriorityQueue**: jobs are processed by priority. Lower numeric priority values
   are processed first.
 
-### Shared erased queue
-
-Build a `JobQueueSystemBuilder` when you want one queue to carry several
-unrelated ordinary task types through the same worker pool:
-
-```rust
-use jobq::{JobQueueSystemBuilder, JobOptions, Task};
-
-#[tokio::main]
-async fn main() {
-    let (job_queue, worker_pool) = JobQueueSystemBuilder::fifo(10)
-        .with_num_workers(2)
-        .build();
-
-    let worker_pool_clone = worker_pool.clone();
-    let handle = tokio::spawn(async move {
-        worker_pool_clone.run().await;
-    });
-
-    let number_future = job_queue
-        .enqueue_job(JobOptions::new(MyTask { n: 21 }))
-        .await
-        .unwrap();
-    let string_future = job_queue
-        .enqueue_fn(|| async { Ok::<String, MyTaskError>("hello!".to_string()) })
-        .await
-        .unwrap();
-
-    println!("number: {}", number_future.result().await.unwrap());
-    println!("string: {}", string_future.result().await.unwrap());
-
-    worker_pool.shutdown().await;
-    handle.await.unwrap();
-}
-```
-
-Each enqueue call still returns a fully typed future for that specific task's own
-output.
-
 ### Streaming tasks
 
 Implement `StreamTask` for work that produces items over time:

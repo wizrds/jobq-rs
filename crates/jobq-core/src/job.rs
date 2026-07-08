@@ -4,7 +4,7 @@ use std::{any::Any, future::Future, panic::AssertUnwindSafe, sync::Arc};
 
 use crate::{
     error::Error,
-    executable::Executable,
+    executable::{Executable, AnyExecutable},
     future::{JobFuture, JobFutureSetter, JobStream, JobStreamHandle, JobStreamSetter},
     queue::{fifo::FifoQueue, lifo::LifoQueue, priority::PriorityQueue, traits::Queue},
     task::{FnStreamTask, FnTask, StreamTask, Task},
@@ -411,7 +411,7 @@ where
 
 impl<Q> JobQueue<Q>
 where
-    Q: Queue<Item = Box<dyn Executable>>,
+    Q: Queue<Item = AnyExecutable>,
 {
     /// Enqueues a [`Task`](crate::task::Task) and returns a
     /// [`JobFuture`](crate::future::JobFuture) for its result.
@@ -426,7 +426,7 @@ where
         let (task, max_retries, queue_options) = options.into_parts();
         let (job, future) = Job::new(task, max_retries);
 
-        self.enqueue(Box::new(job), queue_options)
+        self.enqueue(AnyExecutable::new(job), queue_options)
             .await?;
 
         Ok(future)
@@ -456,7 +456,7 @@ where
         let (task, capacity, queue_options) = options.into_parts();
         let (job, handle) = StreamJob::new(task, capacity);
 
-        self.enqueue(Box::new(job), queue_options)
+        self.enqueue(AnyExecutable::new(job), queue_options)
             .await?;
 
         Ok(handle)

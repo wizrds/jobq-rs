@@ -13,7 +13,7 @@
 //! - **[`Task`]**: an async unit of work that returns one final result.
 //! - **[`StreamTask`]**: a task that yields many items over time.
 //! - **[`JobFuture`]**: a handle for awaiting an ordinary task's final result.
-//! - **[`StreamHandle`]**: a live stream of produced items, plus a `result()` for the outcome.
+//! - **[`JobStreamHandle`]**: a live stream of produced items, plus a `result()` for the outcome.
 //! - **[`JobQueue`]**: a queue that stores executable jobs.
 //! - **[`Worker`]**: a worker that dequeues and runs jobs.
 //! - **[`WorkerPool`]**: a pool of workers that execute jobs concurrently.
@@ -193,7 +193,7 @@ extern crate self as jobq;
 pub use jobq_core::{
     builder::{BatchJobQueueSystemBuilder, JobQueueSystemBuilder, QueueSystemBuilder},
     error::Error,
-    executable::Executable,
+    executable::{Executable, AnyExecutable},
     future::{JobFuture, JobFutureSet, JobStream, JobStreamHandle},
     job::{Job, JobOptions, JobQueue, JobQueueBuilder, JobStatus, JobStreamOptions, StreamJob},
     queue::{
