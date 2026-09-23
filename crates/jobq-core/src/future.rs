@@ -184,6 +184,10 @@ where
             .await
             .map_err(|_| Error::future_closed())
     }
+
+    pub fn is_closed(&self) -> bool {
+        self.sender.is_closed()
+    }
 }
 
 /// The consumer handle for a streaming job: a [`Stream`] of produced items, plus a

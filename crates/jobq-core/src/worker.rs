@@ -4,14 +4,13 @@ use futures::{
     future::{FutureExt, join_all},
     select,
 };
-use futures_timeout::TimeoutExt;
-use std::{marker::PhantomData, sync::Arc, time::Duration};
+use std::{marker::PhantomData, sync::Arc};
 
 use crate::{executable::Executable, job::JobQueue, queue::traits::Queue};
 
 /// Trait for defining a worker that processes jobs from a job queue.
 #[async_trait]
-pub trait Worker<Q>: Send + Sync
+pub trait Worker<Q>: Send + Sync + Clone
 where
     Q: Queue<Item: Executable> + 'static,
 {
@@ -29,7 +28,7 @@ where
     ///
     /// # Returns
     /// A new worker instance.
-    fn create(id: usize, queue: Arc<JobQueue<Q>>, options: Self::Options) -> Self
+    fn create(id: usize, queue: JobQueue<Q>, options: Self::Options) -> Self
     where
         Self: Sized;
 
@@ -47,7 +46,7 @@ where
     Q: Queue<Item: Executable>,
 {
     id: usize,
-    queue: Arc<JobQueue<Q>>,
+    queue: JobQueue<Q>,
     shutdown: Arc<Event>,
 }
 
@@ -62,7 +61,7 @@ where
         self.id
     }
 
-    fn create(id: usize, queue: Arc<JobQueue<Q>>, _options: Self::Options) -> Self {
+    fn create(id: usize, queue: JobQueue<Q>, _options: Self::Options) -> Self {
         Self {
             id,
             queue,
@@ -89,115 +88,16 @@ where
     }
 }
 
-/// Options for configuring a [`BatchJobWorker`](crate::worker::BatchJobWorker).
-#[derive(Debug, Clone)]
-pub struct BatchJobWorkerOptions {
-    /// Maximum number of jobs to process in a single batch.
-    pub batch_size: usize,
-    /// Timeout for collecting jobs in a batch.
-    /// If the timeout is reached, the batch will be processed even if it is not full.
-    pub batch_timeout: Duration,
-}
-
-impl Default for BatchJobWorkerOptions {
-    fn default() -> Self {
-        Self {
-            batch_size: 4,
-            batch_timeout: Duration::from_millis(50),
-        }
-    }
-}
-
-/// A worker that processes jobs in batches from a [`JobQueue`](crate::job::JobQueue).
-#[derive(Debug)]
-pub struct BatchJobWorker<Q>
-where
-    Q: Queue<Item: Executable>,
-{
-    id: usize,
-    queue: Arc<JobQueue<Q>>,
-    options: BatchJobWorkerOptions,
-    shutdown: Arc<Event>,
-}
-
-impl<Q> BatchJobWorker<Q>
+impl<Q> Clone for JobWorker<Q>
 where
     Q: Queue<Item: Executable> + 'static,
 {
-    /// Creates a new [`BatchJobWorker`](crate::worker::BatchJobWorker) instance.
-    ///
-    /// # Arguments
-    /// * `id` - The unique identifier for the worker.
-    /// * `queue` - The job queue from which the worker will dequeue jobs.
-    /// * `options` - Options for configuring the batch processing behavior.
-    pub fn new(id: usize, queue: Arc<JobQueue<Q>>, options: BatchJobWorkerOptions) -> Self {
+    fn clone(&self) -> Self {
         Self {
-            id,
-            queue,
-            options,
-            shutdown: Arc::new(Event::new()),
+            id: self.id,
+            queue: self.queue.clone(),
+            shutdown: self.shutdown.clone(),
         }
-    }
-
-    /// Collects a batch of jobs from the queue.
-    async fn collect_batch(&self, batch_size: usize, batch_timeout: Duration) -> Vec<Q::Item> {
-        let mut jobs = Vec::with_capacity(batch_size);
-
-        while jobs.len() < batch_size {
-            match self
-                .queue
-                .dequeue_job()
-                .timeout(batch_timeout)
-                .await
-                .map_err(|_| ())
-                .and_then(|res| res.map_err(|_| ()))
-            {
-                Ok(Some(job)) => jobs.push(job),
-                _ => break,
-            }
-        }
-
-        jobs
-    }
-}
-
-#[async_trait]
-impl<Q> Worker<Q> for BatchJobWorker<Q>
-where
-    Q: Queue<Item: Executable> + 'static,
-{
-    type Options = BatchJobWorkerOptions;
-
-    fn id(&self) -> usize {
-        self.id
-    }
-
-    fn create(id: usize, queue: Arc<JobQueue<Q>>, options: Self::Options) -> Self {
-        Self::new(id, queue, options)
-    }
-
-    async fn run(&self) {
-        loop {
-            select! {
-                _ = self.shutdown.listen().fuse() => break,
-                jobs = self.collect_batch(
-                    self.options.batch_size,
-                    self.options.batch_timeout
-                ).fuse() => {
-                    if !jobs.is_empty() {
-                        join_all(
-                            jobs
-                                .into_iter()
-                                .map(|mut job| async move { job.execute().await })
-                        ).await;
-                    }
-                }
-            }
-        }
-    }
-
-    async fn shutdown(&self) {
-        self.shutdown.notify(usize::MAX);
     }
 }
 
@@ -208,7 +108,7 @@ where
     Q: Queue<Item: Executable> + 'static,
     W: Worker<Q> + 'static,
 {
-    workers: Vec<Arc<W>>,
+    workers: Arc<Vec<Arc<W>>>,
     _marker: PhantomData<Q>,
 }
 
@@ -225,7 +125,10 @@ where
     /// # Returns
     /// A new [`WorkerPool`](crate::worker::WorkerPool) instance.
     pub fn new(workers: Vec<Arc<W>>) -> Self {
-        Self { workers, _marker: PhantomData }
+        Self {
+            workers: Arc::new(workers),
+            _marker: PhantomData,
+        }
     }
 
     /// Executes all workers in the pool concurrently.
@@ -265,7 +168,7 @@ where
     /// # Returns
     /// A slice of `Arc<W>` containing the workers in the pool.
     pub fn workers(&self) -> &[Arc<W>] {
-        &self.workers
+        self.workers.as_ref()
     }
 
     /// Returns the number of workers in the pool.
@@ -297,6 +200,19 @@ where
     }
 }
 
+impl<Q, W> Clone for WorkerPool<Q, W>
+where
+    Q: Queue<Item: Executable> + 'static,
+    W: Worker<Q> + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            workers: self.workers.clone(),
+            _marker: PhantomData,
+        }
+    }
+}
+
 /// A builder for creating a [`WorkerPool`](crate::worker::WorkerPool).
 #[derive(Debug)]
 pub struct WorkerPoolBuilder<Q, W>
@@ -306,7 +222,7 @@ where
 {
     num_workers: usize,
     worker_options: Option<W::Options>,
-    queue: Option<Arc<JobQueue<Q>>>,
+    queue: Option<JobQueue<Q>>,
     _marker: PhantomData<(Q, W)>,
 }
 
@@ -366,7 +282,7 @@ where
     ///
     /// # Returns
     /// A mutable reference to the builder instance for method chaining.
-    pub fn with_queue(mut self, queue: Arc<JobQueue<Q>>) -> Self {
+    pub fn with_queue(mut self, queue: JobQueue<Q>) -> Self {
         self.queue = Some(queue);
         self
     }
@@ -374,10 +290,10 @@ where
     /// Builds the [`WorkerPool`](crate::worker::WorkerPool) with the specified workers.
     ///
     /// # Returns
-    /// A new [`WorkerPool`](crate::worker::WorkerPool) instance wrapped in `Arc` containing the configured workers.
-    pub fn build(self) -> Arc<WorkerPool<Q, W>> {
-        Arc::new(WorkerPool {
-            workers: (0..self.num_workers)
+    /// A new [`WorkerPool`](crate::worker::WorkerPool) instance.
+    pub fn build(self) -> WorkerPool<Q, W> {
+        WorkerPool::new(
+            (0..self.num_workers)
                 .map(|id| {
                     Arc::new(W::create(
                         id,
@@ -390,7 +306,6 @@ where
                     ))
                 })
                 .collect(),
-            _marker: PhantomData,
-        })
+        )
     }
 }

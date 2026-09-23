@@ -1,6 +1,7 @@
 #[allow(unused_extern_crates)]
 extern crate self as jobq_core;
 
+pub mod batch;
 pub mod builder;
 pub mod error;
 pub mod executable;
