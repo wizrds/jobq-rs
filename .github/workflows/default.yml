@@ -1,12 +1,9 @@
 name: default
 
 on:
-  push:
-    branches-ignore:
+  pull_request:
+    branches:
       - main
-      - dev
-    tags-ignore:
-      - '**'
 
 jobs:
   lint:
@@ -21,12 +18,14 @@ jobs:
           fetch-depth: 0
 
       - name: Install Task
-        uses: arduino/setup-task@v2
+        uses: arduino/setup-task@v3
         with:
           version: 3.43.3
 
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
 
       - name: Lint commit message
         run: |
@@ -35,3 +34,30 @@ jobs:
 
       - name: Lint code
         run: task rust:lint
+
+      - name: Format code
+        run: task rust:fmt
+
+  tests:
+    if: "!contains(github.event.head_commit.message, '[skip-ci]')"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install Task
+        uses: arduino/setup-task@v3
+        with:
+          version: 3.43.3
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+
+      - name: Unit tests
+        run: task rust:test
