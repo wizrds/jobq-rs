@@ -177,9 +177,8 @@ where
     executor: Arc<Batched<B>>,
     queue: JobQueue<Q>,
     policy: BatchPolicy,
-    window: Mutex<
-        Option<OpenWindow<Window<Batched<B>, B::Input, JobDelivery<B::Output>>, Q::Options>>,
-    >,
+    window:
+        Mutex<Option<OpenWindow<Window<Batched<B>, B::Input, JobDelivery<B::Output>>, Q::Options>>>,
 }
 
 struct StreamBatcherInner<B, Q>
@@ -545,8 +544,7 @@ mod tests {
             futures.push(
                 batcher
                     .enqueue(
-                        JobOptions::new(input)
-                            .with_queue_options(PriorityOptions { priority }),
+                        JobOptions::new(input).with_queue_options(PriorityOptions { priority }),
                     )
                     .await
                     .unwrap(),

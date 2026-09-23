@@ -20,10 +20,7 @@ pub enum Error {
     #[error("task panicked: {0}")]
     TaskPanic(String),
     #[error("batch returned {actual} results for {expected} members")]
-    BatchSizeMismatch {
-        expected: usize,
-        actual: usize,
-    },
+    BatchSizeMismatch { expected: usize, actual: usize },
 }
 
 impl Error {

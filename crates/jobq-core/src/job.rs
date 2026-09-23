@@ -1174,10 +1174,7 @@ mod tests {
         assert_eq!(zero.result().await.unwrap(), 0);
         assert_eq!(one.result().await.unwrap(), 1);
         assert!(matches!(five.result().await, Err(Error::TaskExecution { .. })));
-        assert_eq!(
-            *calls.lock().unwrap(),
-            vec![vec![0, 1, 5], vec![1, 5], vec![5]]
-        );
+        assert_eq!(*calls.lock().unwrap(), vec![vec![0, 1, 5], vec![1, 5], vec![5]]);
 
         worker_pool.shutdown().await;
         run_handle.await.unwrap();

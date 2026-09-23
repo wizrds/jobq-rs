@@ -53,14 +53,11 @@ impl AnyExecutable {
 #[async_trait]
 impl Executable for AnyExecutable {
     async fn execute(&mut self) {
-        self.as_inner_mut()
-            .execute()
-            .await
+        self.as_inner_mut().execute().await
     }
 
     fn status(&self) -> JobStatus {
-        self.as_inner()
-            .status()
+        self.as_inner().status()
     }
 }
 

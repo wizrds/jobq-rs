@@ -10,7 +10,7 @@ use crate::{executable::Executable, job::JobQueue, queue::traits::Queue};
 
 /// Trait for defining a worker that processes jobs from a job queue.
 #[async_trait]
-pub trait Worker<Q>: Send + Sync
+pub trait Worker<Q>: Send + Sync + Clone
 where
     Q: Queue<Item: Executable> + 'static,
 {
@@ -88,6 +88,19 @@ where
     }
 }
 
+impl<Q> Clone for JobWorker<Q>
+where
+    Q: Queue<Item: Executable> + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            queue: self.queue.clone(),
+            shutdown: self.shutdown.clone(),
+        }
+    }
+}
+
 /// A worker pool that manages multiple workers processing jobs from a job queue.
 #[derive(Debug)]
 pub struct WorkerPool<Q, W>
@@ -95,7 +108,7 @@ where
     Q: Queue<Item: Executable> + 'static,
     W: Worker<Q> + 'static,
 {
-    workers: Vec<Arc<W>>,
+    workers: Arc<Vec<Arc<W>>>,
     _marker: PhantomData<Q>,
 }
 
@@ -112,7 +125,10 @@ where
     /// # Returns
     /// A new [`WorkerPool`](crate::worker::WorkerPool) instance.
     pub fn new(workers: Vec<Arc<W>>) -> Self {
-        Self { workers, _marker: PhantomData }
+        Self {
+            workers: Arc::new(workers),
+            _marker: PhantomData,
+        }
     }
 
     /// Executes all workers in the pool concurrently.
@@ -152,7 +168,7 @@ where
     /// # Returns
     /// A slice of `Arc<W>` containing the workers in the pool.
     pub fn workers(&self) -> &[Arc<W>] {
-        &self.workers
+        self.workers.as_ref()
     }
 
     /// Returns the number of workers in the pool.
@@ -181,6 +197,19 @@ where
     /// with the specified queue and worker types.
     pub fn builder() -> WorkerPoolBuilder<Q, W> {
         WorkerPoolBuilder::new()
+    }
+}
+
+impl<Q, W> Clone for WorkerPool<Q, W>
+where
+    Q: Queue<Item: Executable> + 'static,
+    W: Worker<Q> + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            workers: self.workers.clone(),
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -261,10 +290,10 @@ where
     /// Builds the [`WorkerPool`](crate::worker::WorkerPool) with the specified workers.
     ///
     /// # Returns
-    /// A new [`WorkerPool`](crate::worker::WorkerPool) instance wrapped in `Arc` containing the configured workers.
-    pub fn build(self) -> Arc<WorkerPool<Q, W>> {
-        Arc::new(WorkerPool {
-            workers: (0..self.num_workers)
+    /// A new [`WorkerPool`](crate::worker::WorkerPool) instance.
+    pub fn build(self) -> WorkerPool<Q, W> {
+        WorkerPool::new(
+            (0..self.num_workers)
                 .map(|id| {
                     Arc::new(W::create(
                         id,
@@ -277,7 +306,6 @@ where
                     ))
                 })
                 .collect(),
-            _marker: PhantomData,
-        })
+        )
     }
 }

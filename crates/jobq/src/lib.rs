@@ -308,7 +308,7 @@ pub use jobq_core::{
     batch::{BatchPolicy, Batcher, StreamBatcher, WeakBatcher, WeakStreamBatcher},
     builder::{JobQueueSystemBuilder, QueueSystemBuilder},
     error::Error,
-    executable::{Executable, AnyExecutable},
+    executable::{AnyExecutable, Executable},
     future::{JobFuture, JobFutureSet, JobStream, JobStreamHandle},
     job::{
         Job, JobOptions, JobQueue, JobQueueBuilder, JobStatus, JobStreamOptions, StreamJob,

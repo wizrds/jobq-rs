@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::{
     executable::Executable,
     job::{JobQueue, JobQueueBuilder},
@@ -8,7 +6,7 @@ use crate::{
 };
 
 /// A built job queue system: the [`JobQueue`](crate::job::JobQueue) paired with its [`WorkerPool`](crate::worker::WorkerPool).
-pub type QueueSystem<Q, W> = (JobQueue<Q>, Arc<WorkerPool<Q, W>>);
+pub type QueueSystem<Q, W> = (JobQueue<Q>, WorkerPool<Q, W>);
 
 /// A builder for creating a complete job queue system.
 pub struct QueueSystemBuilder<Q, W>
