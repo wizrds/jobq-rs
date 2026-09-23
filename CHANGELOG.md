@@ -1,6 +1,12 @@
 # Changelog
 
 ---
+## [0.4.0](https://github.com/wizrds/jobq-rs/compare/0.3.1..0.4.0) - 2026-09-23
+
+### Features
+
+-  [**breaking**]Rework batching from worker layer into job layer  - ([88231de](https://github.com/wizrds/jobq-rs/commit/88231dee2d68ea0c36fb1750529c4c3048bf6344)) - Timothy Pogue
+---
 ## [0.3.1](https://github.com/wizrds/jobq-rs/compare/0.3.0..0.3.1) - 2026-07-08
 
 ### Bug Fixes
