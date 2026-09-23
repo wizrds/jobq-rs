@@ -87,6 +87,29 @@ where
     }
 }
 
+#[async_trait]
+pub trait BatchTask: Send + Sync {
+    type Input: Send + Sync + 'static;
+    type Output: Send + Sync + 'static;
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    async fn execute(
+        &self,
+        inputs: &[Self::Input],
+    ) -> Result<Vec<Result<Self::Output, Self::Error>>, Self::Error>;
+}
+
+pub trait BatchStreamTask: Send + Sync {
+    type Input: Send + Sync + 'static;
+    type Item: Send + Sync + 'static;
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    fn execute<'a>(
+        &'a self,
+        inputs: &'a [Self::Input],
+    ) -> BoxStream<'a, (usize, Result<Self::Item, Self::Error>)>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

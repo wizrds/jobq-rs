@@ -4,11 +4,11 @@ use crate::{
     executable::Executable,
     job::{JobQueue, JobQueueBuilder},
     queue::{fifo::FifoQueue, lifo::LifoQueue, priority::PriorityQueue, traits::Queue},
-    worker::{BatchJobWorker, JobWorker, Worker, WorkerPool, WorkerPoolBuilder},
+    worker::{JobWorker, Worker, WorkerPool, WorkerPoolBuilder},
 };
 
 /// A built job queue system: the [`JobQueue`](crate::job::JobQueue) paired with its [`WorkerPool`](crate::worker::WorkerPool).
-pub type QueueSystem<Q, W> = (Arc<JobQueue<Q>>, Arc<WorkerPool<Q, W>>);
+pub type QueueSystem<Q, W> = (JobQueue<Q>, Arc<WorkerPool<Q, W>>);
 
 /// A builder for creating a complete job queue system.
 pub struct QueueSystemBuilder<Q, W>
@@ -123,7 +123,3 @@ where
 /// A type alias for a job queue system builder using the [`JobWorker`](crate::worker::JobWorker)
 /// as the worker type.
 pub type JobQueueSystemBuilder<Q> = QueueSystemBuilder<Q, JobWorker<Q>>;
-
-/// A type alias for a job queue system builder using the [`BatchJobWorker`](crate::worker::BatchJobWorker)
-/// as the worker type.
-pub type BatchJobQueueSystemBuilder<Q> = QueueSystemBuilder<Q, BatchJobWorker<Q>>;

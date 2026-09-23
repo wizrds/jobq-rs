@@ -42,7 +42,7 @@ impl<T> Ord for PriorityItem<T> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PriorityOptions {
     pub priority: u32,
 }
