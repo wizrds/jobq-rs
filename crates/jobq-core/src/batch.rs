@@ -169,8 +169,10 @@ impl<X, I, D> Window<X, I, D> {
     }
 }
 
-type TaskWindow<B> = Window<Batched<B>, <B as BatchTask>::Input, JobDelivery<<B as BatchTask>::Output>>;
-type StreamTaskWindow<B> = Window<Batched<B>, <B as BatchStreamTask>::Input, StreamDelivery<<B as BatchStreamTask>::Item>>;
+type TaskWindow<B> =
+    Window<Batched<B>, <B as BatchTask>::Input, JobDelivery<<B as BatchTask>::Output>>;
+type StreamTaskWindow<B> =
+    Window<Batched<B>, <B as BatchStreamTask>::Input, StreamDelivery<<B as BatchStreamTask>::Item>>;
 
 type WindowSlot<W, O> = Mutex<Option<OpenWindow<W, O>>>;
 

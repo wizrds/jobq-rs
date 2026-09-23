@@ -311,12 +311,7 @@ pub use jobq_core::{
     executable::*,
     future::*,
     job::*,
-    queue::{
-        fifo::*,
-        lifo::*,
-        priority::*,
-        traits::*,
-    },
+    queue::{fifo::*, lifo::*, priority::*, traits::*},
     task::*,
     worker::*,
 };
