@@ -99,6 +99,8 @@ pub trait BatchTask: Send + Sync {
     ) -> Result<Vec<Result<Self::Output, Self::Error>>, Self::Error>;
 }
 
+pub type BatchStreamItem<T, E> = (usize, Result<T, E>);
+
 pub trait BatchStreamTask: Send + Sync {
     type Input: Send + Sync + 'static;
     type Item: Send + Sync + 'static;
@@ -107,7 +109,7 @@ pub trait BatchStreamTask: Send + Sync {
     fn execute<'a>(
         &'a self,
         inputs: &'a [Self::Input],
-    ) -> BoxStream<'a, (usize, Result<Self::Item, Self::Error>)>;
+    ) -> BoxStream<'a, BatchStreamItem<Self::Item, Self::Error>>;
 }
 
 #[cfg(test)]

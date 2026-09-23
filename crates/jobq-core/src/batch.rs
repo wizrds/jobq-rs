@@ -169,6 +169,11 @@ impl<X, I, D> Window<X, I, D> {
     }
 }
 
+type TaskWindow<B> = Window<Batched<B>, <B as BatchTask>::Input, JobDelivery<<B as BatchTask>::Output>>;
+type StreamTaskWindow<B> = Window<Batched<B>, <B as BatchStreamTask>::Input, StreamDelivery<<B as BatchStreamTask>::Item>>;
+
+type WindowSlot<W, O> = Mutex<Option<OpenWindow<W, O>>>;
+
 struct BatcherInner<B, Q>
 where
     B: BatchTask + 'static,
@@ -177,8 +182,7 @@ where
     executor: Arc<Batched<B>>,
     queue: JobQueue<Q>,
     policy: BatchPolicy,
-    window:
-        Mutex<Option<OpenWindow<Window<Batched<B>, B::Input, JobDelivery<B::Output>>, Q::Options>>>,
+    window: WindowSlot<TaskWindow<B>, Q::Options>,
 }
 
 struct StreamBatcherInner<B, Q>
@@ -189,9 +193,7 @@ where
     executor: Arc<Batched<B>>,
     queue: JobQueue<Q>,
     policy: BatchPolicy,
-    window: Mutex<
-        Option<OpenWindow<Window<Batched<B>, B::Input, StreamDelivery<B::Item>>, Q::Options>>,
-    >,
+    window: WindowSlot<StreamTaskWindow<B>, Q::Options>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -258,17 +260,14 @@ where
             queue_options,
             input,
             JobDelivery::new(setter, max_retries),
-        ) {
-            if let Err(error) = self
-                .inner
-                .queue
-                .enqueue(AnyExecutable::new(Job::from_window(window.clone())), queue_options)
-                .await
-            {
-                Window::evict(&self.inner.window, &window);
-
-                return Err(error);
-            }
+        ) && let Err(error) = self
+            .inner
+            .queue
+            .enqueue(AnyExecutable::new(Job::from_window(window.clone())), queue_options)
+            .await
+        {
+            Window::evict(&self.inner.window, &window);
+            return Err(error);
         }
 
         Ok(future)
@@ -358,17 +357,14 @@ where
             queue_options,
             input,
             StreamDelivery::new(item_setter, completion_setter),
-        ) {
-            if let Err(error) = self
-                .inner
-                .queue
-                .enqueue(AnyExecutable::new(StreamJob::from_window(window.clone())), queue_options)
-                .await
-            {
-                Window::evict(&self.inner.window, &window);
-
-                return Err(error);
-            }
+        ) && let Err(error) = self
+            .inner
+            .queue
+            .enqueue(AnyExecutable::new(StreamJob::from_window(window.clone())), queue_options)
+            .await
+        {
+            Window::evict(&self.inner.window, &window);
+            return Err(error);
         }
 
         Ok(JobStreamHandle::new(items, completion))
