@@ -1,6 +1,12 @@
 # Changelog
 
 ---
+## [0.5.1](https://github.com/wizrds/jobq-rs/compare/0.5.0..0.5.1) - 2026-09-25
+
+### Bug Fixes
+
+- Ensure independent batch streams decide when to close for parity with normal stream tasks - ([69633b1](https://github.com/wizrds/jobq-rs/commit/69633b145fbea44aab8879b82b351e25f883ceed)) - Timothy Pogue
+---
 ## [0.5.0](https://github.com/wizrds/jobq-rs/compare/0.4.0..0.5.0) - 2026-09-25
 
 ### Features
