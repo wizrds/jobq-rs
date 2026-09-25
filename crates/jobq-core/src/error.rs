@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{any::Any, sync::Arc};
 use thiserror::Error;
 
 use crate::queue::error::Error as QueueError;
@@ -21,6 +21,14 @@ pub enum Error {
     TaskPanic(String),
     #[error("batch returned {actual} results for {expected} members")]
     BatchSizeMismatch { expected: usize, actual: usize },
+    #[error("invalid stream capacity: {0}")]
+    InvalidStreamCapacity(usize),
+    #[error("stream consumer cancelled")]
+    ConsumerCancelled,
+    #[error("stream consumer lagged")]
+    ConsumerLag,
+    #[error("stream batch member did not complete")]
+    IncompleteStreamBatch,
 }
 
 impl Error {
@@ -50,7 +58,33 @@ impl Error {
         Self::TaskPanic(message.into())
     }
 
+    pub fn from_panic(panic: Box<dyn Any + Send>) -> Self {
+        Self::task_panic(
+            panic
+                .downcast_ref::<&str>()
+                .map(ToString::to_string)
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_string()),
+        )
+    }
+
     pub fn batch_size_mismatch(expected: usize, actual: usize) -> Self {
         Self::BatchSizeMismatch { expected, actual }
+    }
+
+    pub fn invalid_stream_capacity(capacity: usize) -> Self {
+        Self::InvalidStreamCapacity(capacity)
+    }
+
+    pub fn consumer_cancelled() -> Self {
+        Self::ConsumerCancelled
+    }
+
+    pub fn consumer_lag() -> Self {
+        Self::ConsumerLag
+    }
+
+    pub fn incomplete_stream_batch() -> Self {
+        Self::IncompleteStreamBatch
     }
 }

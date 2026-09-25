@@ -1,7 +1,6 @@
 use async_trait::async_trait;
-use futures::{Stream, StreamExt, future::FutureExt};
+use futures::{Stream, StreamExt, channel::mpsc, future::FutureExt};
 use std::{
-    any::Any,
     future::Future,
     iter::repeat_with,
     panic::AssertUnwindSafe,
@@ -9,12 +8,15 @@ use std::{
 };
 
 use crate::{
-    batch::{BatchPolicy, Batcher, StreamBatcher, Window},
+    batch::{
+        BatchPolicy, BatchTask, BatcherBuilder, StreamBatchContext, StreamBatchMode,
+        StreamBatcherBuilder, StreamWindow, TaskWindow, Window,
+    },
     error::Error,
     executable::{AnyExecutable, Executable, Execute, ExecuteStream, Single},
-    future::{JobFuture, JobFutureSetter, JobStream, JobStreamHandle, JobStreamSetter},
+    future::{JobFuture, JobFutureSetter, JobStreamHandle, JobStreamSetter, StreamLifecycle},
     queue::{fifo::FifoQueue, lifo::LifoQueue, priority::PriorityQueue, traits::Queue},
-    task::{BatchStreamTask, BatchTask, FnStreamTask, FnTask, StreamTask, Task},
+    task::{FnStreamTask, FnTask, StreamTask, Task},
 };
 
 pub(crate) struct JobDelivery<O>
@@ -34,12 +36,12 @@ where
         Self { setter, attempts: 0, max_retries }
     }
 
-    fn retry(&mut self) -> bool {
+    pub(crate) fn retry(&mut self) -> bool {
         self.attempts += 1;
         self.attempts < self.max_retries
     }
 
-    fn deliver(&mut self, result: Result<O, Error>) {
+    pub(crate) fn deliver(&mut self, result: Result<O, Error>) {
         self.setter.set_result(result);
     }
 }
@@ -49,27 +51,42 @@ where
     I: Send + Sync,
 {
     items: JobStreamSetter<I>,
-    completion: JobFutureSetter<()>,
+    lifecycle: StreamLifecycle,
 }
 
 impl<I> StreamDelivery<I>
 where
     I: Send + Sync,
 {
-    pub(crate) fn new(items: JobStreamSetter<I>, completion: JobFutureSetter<()>) -> Self {
-        Self { items, completion }
+    pub(crate) fn new(items: JobStreamSetter<I>) -> Self {
+        Self { lifecycle: items.lifecycle(), items }
     }
 
-    async fn send(&mut self, item: Result<I, Error>) {
-        let _ = self.items.send(item).await;
+    pub(crate) async fn send(&mut self, item: Result<I, Error>) -> Result<(), Error> {
+        self.items.send(item).await
     }
 
-    fn is_closed(&self) -> bool {
-        self.items.is_closed()
+    pub(crate) fn try_send(
+        &mut self,
+        item: Result<I, Error>,
+    ) -> Result<(), mpsc::TrySendError<Result<I, Error>>> {
+        self.items.try_send(item)
     }
 
-    fn complete(&mut self, result: Result<(), Error>) {
-        self.completion.set_result(result);
+    pub(crate) fn is_closed(&self) -> bool {
+        !self.lifecycle.is_open()
+    }
+
+    pub(crate) fn complete(&mut self, outcome: Result<(), Error>) {
+        self.lifecycle.set_terminal(outcome);
+    }
+
+    pub(crate) fn lifecycle(&self) -> StreamLifecycle {
+        self.lifecycle.clone()
+    }
+
+    pub(crate) fn finish(self, outcome: Result<(), Error>) {
+        self.lifecycle.set_terminal(outcome);
     }
 }
 
@@ -186,7 +203,7 @@ pub struct Job<X>
 where
     X: Execute,
 {
-    window: Arc<Window<X, X::Input, JobDelivery<X::Output>>>,
+    window: Arc<TaskWindow<X, X::Input, X::Output>>,
     status: JobStatus,
 }
 
@@ -223,18 +240,8 @@ impl<X> Job<X>
 where
     X: Execute,
 {
-    pub(crate) fn from_window(window: Arc<Window<X, X::Input, JobDelivery<X::Output>>>) -> Self {
+    pub(crate) fn from_window(window: Arc<TaskWindow<X, X::Input, X::Output>>) -> Self {
         Self { window, status: JobStatus::Pending }
-    }
-
-    fn panic_message(panic: Box<dyn Any + Send>) -> String {
-        if let Some(s) = panic.downcast_ref::<&str>() {
-            s.to_string()
-        } else if let Some(s) = panic.downcast_ref::<String>() {
-            s.clone()
-        } else {
-            "unknown panic".to_string()
-        }
     }
 
     /// Returns the task associated with the job.
@@ -273,9 +280,9 @@ where
                     .take(size)
                     .collect(),
                 Err(panic) => {
-                    let message = Self::panic_message(panic);
+                    let error = Error::from_panic(panic);
 
-                    repeat_with(|| Err(Error::task_panic(message.clone())))
+                    repeat_with(|| Err(error.clone()))
                         .take(size)
                         .collect()
                 }
@@ -315,8 +322,6 @@ where
     }
 }
 
-/// A job that drives a [`StreamTask`](crate::task::StreamTask) and forwards its items to a
-/// [`StreamHandle`](crate::future::StreamHandle).
 pub struct StreamJob<X>
 where
     X: ExecuteStream,
@@ -329,25 +334,18 @@ impl<S> StreamJob<Single<S>>
 where
     S: StreamTask + 'static,
 {
-    /// Creates a new [`StreamJob`](crate::job::StreamJob) and the
-    /// [`StreamHandle`](crate::future::StreamHandle) used to consume it.
-    ///
-    /// # Arguments
-    /// * `task` - The streaming task to be driven by the job.
-    /// * `capacity` - The item channel capacity.
-    pub fn new(task: S, capacity: usize) -> (Self, JobStreamHandle<S::Item>) {
-        let (items, item_setter) = JobStream::new(capacity);
-        let (completion, completion_setter) = JobFuture::new();
+    pub fn new(task: S, capacity: usize) -> Result<(Self, JobStreamHandle<S::Item>), Error> {
+        let (handle, setter) = JobStreamHandle::new(capacity, None)?;
 
-        (
+        Ok((
             Self::from_window(Arc::new(Window::new(
                 Arc::new(Single::new(task)),
                 BatchPolicy::default(),
                 (),
-                StreamDelivery::new(item_setter, completion_setter),
+                StreamDelivery::new(setter),
             ))),
-            JobStreamHandle::new(items, completion),
-        )
+            handle,
+        ))
     }
 }
 
@@ -357,16 +355,6 @@ where
 {
     pub(crate) fn from_window(window: Arc<Window<X, X::Input, StreamDelivery<X::Item>>>) -> Self {
         Self { window, status: JobStatus::Pending }
-    }
-
-    fn panic_message(panic: Box<dyn Any + Send>) -> String {
-        if let Some(s) = panic.downcast_ref::<&str>() {
-            s.to_string()
-        } else if let Some(s) = panic.downcast_ref::<String>() {
-            s.clone()
-        } else {
-            "unknown panic".to_string()
-        }
     }
 
     /// Returns the current status of the streaming job.
@@ -395,7 +383,9 @@ where
             {
                 Ok(Some((index, item))) => {
                     if let Some(delivery) = deliveries.get_mut(index) {
-                        delivery.send(item).await;
+                        if delivery.send(item).await.is_err() {
+                            break;
+                        }
                     }
 
                     if deliveries
@@ -409,13 +399,11 @@ where
                 Err(panic) => {
                     drop(stream);
 
-                    let message = Self::panic_message(panic);
+                    let error = Error::from_panic(panic);
 
                     deliveries
                         .iter_mut()
-                        .for_each(|delivery| {
-                            delivery.complete(Err(Error::task_panic(message.clone())))
-                        });
+                        .for_each(|delivery| delivery.complete(Err(error.clone())));
 
                     self.status = JobStatus::Failed;
 
@@ -431,6 +419,79 @@ where
             .for_each(|delivery| delivery.complete(Ok(())));
 
         self.status = JobStatus::Completed;
+    }
+
+    fn status(&self) -> JobStatus {
+        self.status
+    }
+}
+
+pub struct StreamBatchJob<B, M>
+where
+    B: Send + Sync + 'static,
+    M: StreamBatchMode<B>,
+{
+    window: Arc<StreamWindow<B, M, M::Input, M::Item>>,
+    status: JobStatus,
+}
+
+impl<B, M> StreamBatchJob<B, M>
+where
+    B: Send + Sync + 'static,
+    M: StreamBatchMode<B>,
+{
+    pub(crate) fn from_window(window: Arc<StreamWindow<B, M, M::Input, M::Item>>) -> Self {
+        Self { window, status: JobStatus::Pending }
+    }
+
+    pub fn status(&self) -> JobStatus {
+        self.status
+    }
+}
+
+#[async_trait]
+impl<B, M> Executable for StreamBatchJob<B, M>
+where
+    B: Send + Sync + 'static,
+    M: StreamBatchMode<B>,
+{
+    async fn execute(&mut self) {
+        self.status = JobStatus::Running;
+
+        self.window.ready().await;
+
+        let (inputs, deliveries) = self.window.seal();
+        let (context, completion) = StreamBatchContext::new(deliveries);
+        let activity = context.activity();
+
+        if !(0..activity.len()).any(|index| activity.is_open(index)) {
+            completion.fail_unfinished(Error::consumer_cancelled());
+            self.status = JobStatus::Failed;
+            return;
+        }
+
+        match AssertUnwindSafe(
+            self.window
+                .executor()
+                .run(&inputs, context),
+        )
+        .catch_unwind()
+        .await
+        {
+            Ok(status) => {
+                completion.fail_unfinished(Error::incomplete_stream_batch());
+
+                self.status = if status == JobStatus::Failed || completion.has_failure() {
+                    JobStatus::Failed
+                } else {
+                    JobStatus::Completed
+                };
+            }
+            Err(panic) => {
+                completion.fail_unfinished(Error::from_panic(panic));
+                self.status = JobStatus::Failed;
+            }
+        }
     }
 
     fn status(&self) -> JobStatus {
@@ -581,7 +642,7 @@ where
         S: StreamTask + 'static,
     {
         let (task, capacity, queue_options) = options.into_parts();
-        let (job, handle) = StreamJob::new(task, capacity);
+        let (job, handle) = StreamJob::new(task, capacity)?;
 
         self.enqueue(AnyExecutable::new(job), queue_options)
             .await?;
@@ -608,20 +669,20 @@ where
 
 impl<Q> JobQueue<Q>
 where
-    Q: Queue<Item = AnyExecutable, Options: Clone + PartialEq>,
+    Q: Queue<Item = AnyExecutable, Options: Clone + PartialEq> + 'static,
 {
-    pub fn batcher<B>(&self, task: B, policy: BatchPolicy) -> Batcher<B, Q>
+    pub fn batcher<B>(&self, task: B) -> BatcherBuilder<B, Q>
     where
         B: BatchTask + 'static,
     {
-        Batcher::new(self.clone(), task, policy)
+        BatcherBuilder::new(self.clone(), task)
     }
 
-    pub fn stream_batcher<B>(&self, task: B, policy: BatchPolicy) -> StreamBatcher<B, Q>
+    pub fn stream_batcher<B>(&self, task: B) -> StreamBatcherBuilder<B, Q, ()>
     where
-        B: BatchStreamTask + 'static,
+        B: Send + Sync + 'static,
     {
-        StreamBatcher::new(self.clone(), task, policy)
+        StreamBatcherBuilder::new(self.clone(), task)
     }
 }
 
@@ -733,7 +794,12 @@ mod tests {
 
     use super::*;
     use crate::{
+        batch::{
+            BatchStreamEvent, Multiplexed, MultiplexedBatchStreamTask, StreamBatchActivity,
+            StreamBatchContext, StreamBatchMode,
+        },
         builder::JobQueueSystemBuilder,
+        queue::fifo::FifoQueue,
         task::{StreamTask, Task},
     };
     use std::{
@@ -945,7 +1011,7 @@ mod tests {
 
     struct TagStream;
 
-    impl BatchStreamTask for TagStream {
+    impl MultiplexedBatchStreamTask for TagStream {
         type Input = u32;
         type Item = u32;
         type Error = TestError;
@@ -953,16 +1019,41 @@ mod tests {
         fn execute<'a>(
             &'a self,
             inputs: &'a [Self::Input],
-        ) -> futures::stream::BoxStream<'a, (usize, Result<Self::Item, Self::Error>)> {
+            _activity: &'a StreamBatchActivity,
+        ) -> futures::stream::BoxStream<'a, BatchStreamEvent<Self::Item, Self::Error>> {
             stream::iter(
                 inputs
                     .iter()
                     .enumerate()
                     .flat_map(|(index, input)| {
-                        [(index, Ok(input * 10)), (index, Ok(input * 10 + 1))]
+                        [
+                            BatchStreamEvent::Item { index, item: Ok(input * 10) },
+                            BatchStreamEvent::Item { index, item: Ok(input * 10 + 1) },
+                            BatchStreamEvent::Finished { index, outcome: Ok(()) },
+                        ]
                     }),
             )
             .boxed()
+        }
+    }
+
+    struct PanicMode;
+
+    #[async_trait]
+    impl StreamBatchMode<()> for PanicMode {
+        type Input = u8;
+        type Item = u8;
+
+        async fn run(
+            &self,
+            _task: &(),
+            _inputs: &[Self::Input],
+            context: StreamBatchContext<Self::Item>,
+        ) -> JobStatus {
+            let mut members = context.into_members();
+
+            members[0].finish(Ok(()));
+            panic!("outer mode panic");
         }
     }
 
@@ -1151,13 +1242,13 @@ mod tests {
         });
 
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let batcher = queue.batcher(
-            FlakyBatch { calls: calls.clone() },
-            BatchPolicy {
+        let batcher = queue
+            .batcher(FlakyBatch { calls: calls.clone() })
+            .policy(BatchPolicy {
                 max_size: 3,
                 max_wait: Duration::from_secs(60),
-            },
-        );
+            })
+            .build();
         let zero = batcher
             .enqueue(JobOptions::new(0).with_max_retries(1))
             .await
@@ -1191,13 +1282,13 @@ mod tests {
             async move { worker_pool.run().await }
         });
 
-        let batcher = queue.batcher(
-            ShortBatch,
-            BatchPolicy {
+        let batcher = queue
+            .batcher(ShortBatch)
+            .policy(BatchPolicy {
                 max_size: 2,
                 max_wait: Duration::from_secs(60),
-            },
-        );
+            })
+            .build();
         let mut futures = Vec::new();
 
         for input in [1, 2] {
@@ -1231,13 +1322,13 @@ mod tests {
             async move { worker_pool.run().await }
         });
 
-        let batcher = queue.batcher(
-            PanicBatch,
-            BatchPolicy {
+        let batcher = queue
+            .batcher(PanicBatch)
+            .policy(BatchPolicy {
                 max_size: 2,
                 max_wait: Duration::from_secs(60),
-            },
-        );
+            })
+            .build();
         let mut futures = Vec::new();
 
         for input in [1, 2] {
@@ -1268,13 +1359,14 @@ mod tests {
             async move { worker_pool.run().await }
         });
 
-        let batcher = queue.stream_batcher(
-            TagStream,
-            BatchPolicy {
+        let batcher = queue
+            .stream_batcher(TagStream)
+            .mode(Multiplexed)
+            .policy(BatchPolicy {
                 max_size: 2,
                 max_wait: Duration::from_secs(60),
-            },
-        );
+            })
+            .build();
         let mut handles = Vec::new();
 
         for input in [1, 2] {
@@ -1295,5 +1387,47 @@ mod tests {
 
         worker_pool.shutdown().await;
         run_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn plain_stream_rejects_zero_capacity_before_submission() {
+        let queue = JobQueue::new(FifoQueue::<AnyExecutable>::new(10));
+
+        assert!(matches!(
+            queue
+                .enqueue_stream(JobStreamOptions::new(CountStreamTask).with_capacity(0))
+                .await,
+            Err(Error::InvalidStreamCapacity(0))
+        ));
+        assert_eq!(queue.len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn outer_mode_panic_preserves_earlier_member_completion() {
+        let queue = JobQueue::new(FifoQueue::<AnyExecutable>::new(10));
+        let batcher = queue
+            .stream_batcher(())
+            .mode(PanicMode)
+            .policy(BatchPolicy { max_size: 2, max_wait: Duration::ZERO })
+            .build();
+        let first = batcher
+            .enqueue(JobStreamOptions::new(1))
+            .await
+            .unwrap();
+        let second = batcher
+            .enqueue(JobStreamOptions::new(2))
+            .await
+            .unwrap();
+        let mut job = queue
+            .dequeue_job()
+            .await
+            .unwrap()
+            .unwrap();
+
+        job.execute().await;
+
+        assert!(matches!(job.status(), JobStatus::Failed));
+        assert!(first.result().await.is_ok());
+        assert!(matches!(second.result().await, Err(Error::TaskPanic(_))));
     }
 }
