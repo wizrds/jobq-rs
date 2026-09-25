@@ -370,55 +370,53 @@ where
 {
     async fn execute(&mut self) {
         self.status = JobStatus::Running;
-
         self.window.ready().await;
 
         let (inputs, mut deliveries) = self.window.seal();
-        let mut stream = self.window.executor().execute(&inputs);
 
-        loop {
-            match AssertUnwindSafe(stream.next())
-                .catch_unwind()
-                .await
-            {
-                Ok(Some((index, item))) => {
-                    if let Some(delivery) = deliveries.get_mut(index) {
-                        if delivery.send(item).await.is_err() {
+        match AssertUnwindSafe(async {
+            let mut stream = self.window.executor().execute(&inputs);
+
+            loop {
+                match stream.next().await {
+                    Some((index, item)) => {
+                        if let Some(delivery) = deliveries.get_mut(index)
+                            && delivery.send(item).await.is_err()
+                        {
+                            break;
+                        }
+
+                        if deliveries
+                            .iter()
+                            .all(StreamDelivery::is_closed)
+                        {
                             break;
                         }
                     }
-
-                    if deliveries
-                        .iter()
-                        .all(StreamDelivery::is_closed)
-                    {
-                        break;
-                    }
-                }
-                Ok(None) => break,
-                Err(panic) => {
-                    drop(stream);
-
-                    let error = Error::from_panic(panic);
-
-                    deliveries
-                        .iter_mut()
-                        .for_each(|delivery| delivery.complete(Err(error.clone())));
-
-                    self.status = JobStatus::Failed;
-
-                    return;
+                    None => break,
                 }
             }
+        })
+        .catch_unwind()
+        .await
+        {
+            Ok(()) => {
+                for delivery in &mut deliveries {
+                    delivery.complete(Ok(()));
+                }
+
+                self.status = JobStatus::Completed;
+            }
+            Err(panic) => {
+                let error = Error::from_panic(panic);
+
+                for delivery in &mut deliveries {
+                    delivery.complete(Err(error.clone()));
+                }
+
+                self.status = JobStatus::Failed;
+            }
         }
-
-        drop(stream);
-
-        deliveries
-            .iter_mut()
-            .for_each(|delivery| delivery.complete(Ok(())));
-
-        self.status = JobStatus::Completed;
     }
 
     fn status(&self) -> JobStatus {
@@ -1057,6 +1055,19 @@ mod tests {
         }
     }
 
+    struct ConstructorPanicStreamTask;
+
+    impl StreamTask for ConstructorPanicStreamTask {
+        type Item = u32;
+        type Error = TestError;
+
+        fn execute(
+            &self,
+        ) -> futures::stream::BoxStream<'_, Result<Self::Item, Self::Error>> {
+            panic!("stream constructor");
+        }
+    }
+
     #[tokio::test]
     async fn panic_in_task_is_contained_and_fails_fast() {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1429,5 +1440,16 @@ mod tests {
         assert!(matches!(job.status(), JobStatus::Failed));
         assert!(first.result().await.is_ok());
         assert!(matches!(second.result().await, Err(Error::TaskPanic(_))));
+    }
+
+    #[tokio::test]
+    async fn stream_constructor_panic_sets_terminal_failure() {
+        let (mut job, mut handle) = StreamJob::new(ConstructorPanicStreamTask, 1).unwrap();
+
+        job.execute().await;
+
+        assert_eq!(job.status(), JobStatus::Failed);
+        assert!(handle.next().await.is_none());
+        assert!(matches!(handle.result().await, Err(Error::TaskPanic(_))));
     }
 }

@@ -182,12 +182,11 @@ impl Independent {
                     member.finish(Ok(()));
                     return member.failed();
                 }
-                Ok(Some(Err(error))) => {
-                    member.finish(Err(Error::task_execution(error)));
-                    return member.failed();
-                }
-                Ok(Some(Ok(item))) => {
-                    if let Err(error) = member.send(Ok(item)).await {
+                Ok(Some(item)) => {
+                    if let Err(error) = member
+                        .send(item.map_err(Error::task_execution))
+                        .await
+                    {
                         member.finish(Err(error));
                         return member.failed();
                     }
@@ -393,73 +392,26 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn multiplexed_item_error_is_recoverable_and_finished_is_terminal() {
-        let (mut first, first_setter) =
-            JobStreamHandle::<u8>::new(4, Some(Error::consumer_cancelled())).unwrap();
-        let (mut second, second_setter) =
-            JobStreamHandle::<u8>::new(4, Some(Error::consumer_cancelled())).unwrap();
-        let (context, _) = StreamBatchContext::new(vec![
-            StreamDelivery::new(first_setter),
-            StreamDelivery::new(second_setter),
-        ]);
+    struct RecoverableItems;
 
-        let status = Multiplexed
-            .run(&Events, &[(), ()], context)
-            .await;
+    #[async_trait]
+    impl IndependentBatchStreamTask for RecoverableItems {
+        type Input = ();
+        type Shared = ();
+        type Item = u8;
+        type Error = io::Error;
 
-        assert!(matches!(status, JobStatus::Failed));
-        assert!(matches!(first.next().await, Some(Err(Error::TaskExecution { .. }))));
-        assert!(matches!(first.next().await, Some(Ok(1))));
-        assert!(first.next().await.is_none());
-        assert!(first.result().await.is_ok());
-        assert!(matches!(second.next().await, Some(Ok(2))));
-        assert!(second.next().await.is_none());
-        assert!(matches!(second.result().await, Err(Error::TaskExecution { .. })));
-    }
+        async fn prepare(&self, _inputs: &[Self::Input]) -> Result<Self::Shared, Self::Error> {
+            Ok(())
+        }
 
-    #[tokio::test]
-    async fn multiplexed_lag_is_member_local_and_preserves_accepted_items() {
-        let (mut lagging, lagging_setter) =
-            JobStreamHandle::<u8>::new(1, Some(Error::consumer_cancelled())).unwrap();
-        let (mut healthy, healthy_setter) =
-            JobStreamHandle::<u8>::new(2, Some(Error::consumer_cancelled())).unwrap();
-        let (context, _) = StreamBatchContext::new(vec![
-            StreamDelivery::new(lagging_setter),
-            StreamDelivery::new(healthy_setter),
-        ]);
-
-        let status = Multiplexed
-            .run(&LagEvents, &[(), ()], context)
-            .await;
-
-        assert!(matches!(status, JobStatus::Failed));
-        assert!(matches!(lagging.result().await, Err(Error::ConsumerLag)));
-        assert!(matches!(lagging.next().await, Some(Ok(1))));
-        assert!(lagging.next().await.is_none());
-        assert!(matches!(healthy.next().await, Some(Ok(3))));
-        assert!(healthy.result().await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn final_departure_drops_pending_multiplexed_producer() {
-        let dropped = Arc::new(AtomicBool::new(false));
-        let task = PendingEvents(dropped.clone());
-        let (handle, setter) =
-            JobStreamHandle::<u8>::new(1, Some(Error::consumer_cancelled())).unwrap();
-        let (context, _) = StreamBatchContext::new(vec![StreamDelivery::new(setter)]);
-        let inputs = [()];
-        let mut running = Box::pin(Multiplexed.run(&task, &inputs, context));
-
-        assert!(
-            running
-                .as_mut()
-                .now_or_never()
-                .is_none()
-        );
-        drop(handle);
-        assert!(matches!(running.await, JobStatus::Failed));
-        assert!(dropped.load(Ordering::SeqCst));
+        fn stream<'a>(
+            &'a self,
+            _shared: &'a Self::Shared,
+            _input: &'a Self::Input,
+        ) -> BoxStream<'a, Result<Self::Item, Self::Error>> {
+            stream::iter([Err(io::Error::other("recoverable")), Ok(7)]).boxed()
+        }
     }
 
     struct IndependentRanges(Arc<AtomicUsize>);
@@ -509,7 +461,8 @@ mod tests {
             stream::once(async move { Ok(*input) })
                 .chain(stream::unfold((), move |_| async move {
                     self.release.notified().await;
-                    self.wound_down.store(true, Ordering::SeqCst);
+                    self.wound_down
+                        .store(true, Ordering::SeqCst);
 
                     None::<(Result<u8, Infallible>, ())>
                 }))
@@ -592,130 +545,6 @@ mod tests {
             self.0.fetch_add(1, Ordering::SeqCst);
             stream::empty().boxed()
         }
-    }
-
-    #[tokio::test]
-    async fn independent_backpressure_does_not_block_sibling_completion() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let task = IndependentRanges(calls.clone());
-        let (blocked, blocked_setter) =
-            JobStreamHandle::<u8>::new(1, Some(Error::consumer_cancelled())).unwrap();
-        let (healthy, healthy_setter) =
-            JobStreamHandle::<u8>::new(1, Some(Error::consumer_cancelled())).unwrap();
-        let (context, _) = StreamBatchContext::new(vec![
-            StreamDelivery::new(blocked_setter),
-            StreamDelivery::new(healthy_setter),
-        ]);
-        let inputs = [1, 0];
-        let running = tokio::spawn(async move {
-            Independent
-                .run(&task, &inputs, context)
-                .await
-        });
-
-        assert!(healthy.result().await.is_ok());
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        drop(blocked);
-        assert!(matches!(running.await.unwrap(), JobStatus::Failed));
-    }
-
-    #[tokio::test]
-    async fn independent_member_finishes_stream_after_consumer_closes() {
-        let release = Arc::new(Notify::new());
-        let wound_down = Arc::new(AtomicBool::new(false));
-        let (mut handle, setter) =
-            JobStreamHandle::<u8>::new(1, Some(Error::consumer_cancelled())).unwrap();
-        let (context, _) = StreamBatchContext::new(vec![StreamDelivery::new(setter)]);
-        let inputs = [7];
-        let task = Gated {
-            release: release.clone(),
-            wound_down: wound_down.clone(),
-        };
-        let running = tokio::spawn(async move {
-            Independent
-                .run(&task, &inputs, context)
-                .await
-        });
-
-        assert!(matches!(handle.next().await, Some(Ok(7))));
-
-        drop(handle);
-        release.notify_one();
-
-        assert!(matches!(
-            timeout(Duration::from_secs(1), running).await.unwrap().unwrap(),
-            JobStatus::Failed
-        ));
-        assert!(wound_down.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn independent_constructor_panic_is_member_local() {
-        let (first, first_setter) =
-            JobStreamHandle::<u8>::new(1, Some(Error::consumer_cancelled())).unwrap();
-        let (mut second, second_setter) =
-            JobStreamHandle::<u8>::new(1, Some(Error::consumer_cancelled())).unwrap();
-        let (context, _) = StreamBatchContext::new(vec![
-            StreamDelivery::new(first_setter),
-            StreamDelivery::new(second_setter),
-        ]);
-
-        let status = Independent
-            .run(&ConstructorPanic, &[0, 7], context)
-            .await;
-
-        assert!(matches!(status, JobStatus::Failed));
-        assert!(matches!(first.result().await, Err(Error::TaskPanic(_))));
-        assert!(matches!(second.next().await, Some(Ok(7))));
-        assert!(second.result().await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn shared_preparation_error_and_panic_fail_all_members() {
-        for panic in [false, true] {
-            let (first, first_setter) =
-                JobStreamHandle::<u8>::new(1, Some(Error::consumer_cancelled())).unwrap();
-            let (second, second_setter) =
-                JobStreamHandle::<u8>::new(1, Some(Error::consumer_cancelled())).unwrap();
-            let (context, _) = StreamBatchContext::new(vec![
-                StreamDelivery::new(first_setter),
-                StreamDelivery::new(second_setter),
-            ]);
-
-            let status = Independent
-                .run(&PreparationFailure { panic }, &[(), ()], context)
-                .await;
-
-            assert!(matches!(status, JobStatus::Failed));
-            if panic {
-                assert!(matches!(first.result().await, Err(Error::TaskPanic(_))));
-                assert!(matches!(second.result().await, Err(Error::TaskPanic(_))));
-            } else {
-                assert!(matches!(first.result().await, Err(Error::TaskExecution { .. })));
-                assert!(matches!(second.result().await, Err(Error::TaskExecution { .. })));
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn last_departure_cancels_pending_preparation() {
-        let constructions = Arc::new(AtomicUsize::new(0));
-        let task = PendingPreparation(constructions.clone());
-        let (handle, setter) =
-            JobStreamHandle::<u8>::new(1, Some(Error::consumer_cancelled())).unwrap();
-        let (context, _) = StreamBatchContext::new(vec![StreamDelivery::new(setter)]);
-        let inputs = [()];
-        let mut running = Box::pin(Independent.run(&task, &inputs, context));
-
-        assert!(
-            running
-                .as_mut()
-                .now_or_never()
-                .is_none()
-        );
-        drop(handle);
-        assert!(matches!(running.await, JobStatus::Failed));
-        assert_eq!(constructions.load(Ordering::SeqCst), 0);
     }
 
     struct PollPanic;
@@ -809,5 +638,219 @@ mod tests {
 
         assert!(matches!(running.await, JobStatus::Failed));
         assert_eq!(count.load(Ordering::SeqCst), 64);
+    }
+
+    #[tokio::test]
+    async fn multiplexed_item_error_is_recoverable_and_finished_is_terminal() {
+        let (mut first, first_setter) =
+            JobStreamHandle::<u8>::new(4, Some(Error::consumer_cancelled())).unwrap();
+        let (mut second, second_setter) =
+            JobStreamHandle::<u8>::new(4, Some(Error::consumer_cancelled())).unwrap();
+        let (context, _) = StreamBatchContext::new(vec![
+            StreamDelivery::new(first_setter),
+            StreamDelivery::new(second_setter),
+        ]);
+
+        let status = Multiplexed
+            .run(&Events, &[(), ()], context)
+            .await;
+
+        assert!(matches!(status, JobStatus::Failed));
+        assert!(matches!(first.next().await, Some(Err(Error::TaskExecution { .. }))));
+        assert!(matches!(first.next().await, Some(Ok(1))));
+        assert!(first.next().await.is_none());
+        assert!(first.result().await.is_ok());
+        assert!(matches!(second.next().await, Some(Ok(2))));
+        assert!(second.next().await.is_none());
+        assert!(matches!(second.result().await, Err(Error::TaskExecution { .. })));
+    }
+
+    #[tokio::test]
+    async fn multiplexed_lag_is_member_local_and_preserves_accepted_items() {
+        let (mut lagging, lagging_setter) =
+            JobStreamHandle::<u8>::new(1, Some(Error::consumer_cancelled())).unwrap();
+        let (mut healthy, healthy_setter) =
+            JobStreamHandle::<u8>::new(2, Some(Error::consumer_cancelled())).unwrap();
+        let (context, _) = StreamBatchContext::new(vec![
+            StreamDelivery::new(lagging_setter),
+            StreamDelivery::new(healthy_setter),
+        ]);
+
+        let status = Multiplexed
+            .run(&LagEvents, &[(), ()], context)
+            .await;
+
+        assert!(matches!(status, JobStatus::Failed));
+        assert!(matches!(lagging.result().await, Err(Error::ConsumerLag)));
+        assert!(matches!(lagging.next().await, Some(Ok(1))));
+        assert!(lagging.next().await.is_none());
+        assert!(matches!(healthy.next().await, Some(Ok(3))));
+        assert!(healthy.result().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn final_departure_drops_pending_multiplexed_producer() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task = PendingEvents(dropped.clone());
+        let (handle, setter) =
+            JobStreamHandle::<u8>::new(1, Some(Error::consumer_cancelled())).unwrap();
+        let (context, _) = StreamBatchContext::new(vec![StreamDelivery::new(setter)]);
+        let inputs = [()];
+        let mut running = Box::pin(Multiplexed.run(&task, &inputs, context));
+
+        assert!(
+            running
+                .as_mut()
+                .now_or_never()
+                .is_none()
+        );
+        drop(handle);
+        assert!(matches!(running.await, JobStatus::Failed));
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn independent_backpressure_does_not_block_sibling_completion() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let task = IndependentRanges(calls.clone());
+        let (blocked, blocked_setter) =
+            JobStreamHandle::<u8>::new(1, Some(Error::consumer_cancelled())).unwrap();
+        let (healthy, healthy_setter) =
+            JobStreamHandle::<u8>::new(1, Some(Error::consumer_cancelled())).unwrap();
+        let (context, _) = StreamBatchContext::new(vec![
+            StreamDelivery::new(blocked_setter),
+            StreamDelivery::new(healthy_setter),
+        ]);
+        let inputs = [1, 0];
+        let running = tokio::spawn(async move {
+            Independent
+                .run(&task, &inputs, context)
+                .await
+        });
+
+        assert!(healthy.result().await.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        drop(blocked);
+        assert!(matches!(running.await.unwrap(), JobStatus::Failed));
+    }
+
+    #[tokio::test]
+    async fn independent_member_finishes_stream_after_consumer_closes() {
+        let release = Arc::new(Notify::new());
+        let wound_down = Arc::new(AtomicBool::new(false));
+        let (mut handle, setter) =
+            JobStreamHandle::<u8>::new(1, Some(Error::consumer_cancelled())).unwrap();
+        let (context, _) = StreamBatchContext::new(vec![StreamDelivery::new(setter)]);
+        let inputs = [7];
+        let task = Gated {
+            release: release.clone(),
+            wound_down: wound_down.clone(),
+        };
+        let running = tokio::spawn(async move {
+            Independent
+                .run(&task, &inputs, context)
+                .await
+        });
+
+        assert!(matches!(handle.next().await, Some(Ok(7))));
+
+        drop(handle);
+        release.notify_one();
+
+        assert!(matches!(
+            timeout(Duration::from_secs(1), running)
+                .await
+                .unwrap()
+                .unwrap(),
+            JobStatus::Failed
+        ));
+        assert!(wound_down.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn independent_constructor_panic_is_member_local() {
+        let (first, first_setter) =
+            JobStreamHandle::<u8>::new(1, Some(Error::consumer_cancelled())).unwrap();
+        let (mut second, second_setter) =
+            JobStreamHandle::<u8>::new(1, Some(Error::consumer_cancelled())).unwrap();
+        let (context, _) = StreamBatchContext::new(vec![
+            StreamDelivery::new(first_setter),
+            StreamDelivery::new(second_setter),
+        ]);
+
+        let status = Independent
+            .run(&ConstructorPanic, &[0, 7], context)
+            .await;
+
+        assert!(matches!(status, JobStatus::Failed));
+        assert!(matches!(first.result().await, Err(Error::TaskPanic(_))));
+        assert!(matches!(second.next().await, Some(Ok(7))));
+        assert!(second.result().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn shared_preparation_error_and_panic_fail_all_members() {
+        for panic in [false, true] {
+            let (first, first_setter) =
+                JobStreamHandle::<u8>::new(1, Some(Error::consumer_cancelled())).unwrap();
+            let (second, second_setter) =
+                JobStreamHandle::<u8>::new(1, Some(Error::consumer_cancelled())).unwrap();
+            let (context, _) = StreamBatchContext::new(vec![
+                StreamDelivery::new(first_setter),
+                StreamDelivery::new(second_setter),
+            ]);
+
+            let status = Independent
+                .run(&PreparationFailure { panic }, &[(), ()], context)
+                .await;
+
+            assert!(matches!(status, JobStatus::Failed));
+            if panic {
+                assert!(matches!(first.result().await, Err(Error::TaskPanic(_))));
+                assert!(matches!(second.result().await, Err(Error::TaskPanic(_))));
+            } else {
+                assert!(matches!(first.result().await, Err(Error::TaskExecution { .. })));
+                assert!(matches!(second.result().await, Err(Error::TaskExecution { .. })));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn last_departure_cancels_pending_preparation() {
+        let constructions = Arc::new(AtomicUsize::new(0));
+        let task = PendingPreparation(constructions.clone());
+        let (handle, setter) =
+            JobStreamHandle::<u8>::new(1, Some(Error::consumer_cancelled())).unwrap();
+        let (context, _) = StreamBatchContext::new(vec![StreamDelivery::new(setter)]);
+        let inputs = [()];
+        let mut running = Box::pin(Independent.run(&task, &inputs, context));
+
+        assert!(
+            running
+                .as_mut()
+                .now_or_never()
+                .is_none()
+        );
+        drop(handle);
+        assert!(matches!(running.await, JobStatus::Failed));
+        assert_eq!(constructions.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn independent_item_error_is_recoverable() {
+        let (mut handle, setter) =
+            JobStreamHandle::<u8>::new(2, Some(Error::consumer_cancelled())).unwrap();
+        let (context, _) = StreamBatchContext::new(vec![StreamDelivery::new(setter)]);
+
+        let status = Independent.run(&RecoverableItems, &[()], context).await;
+
+        assert!(matches!(status, JobStatus::Completed));
+        assert!(matches!(
+            handle.next().await,
+            Some(Err(Error::TaskExecution { .. }))
+        ));
+        assert!(matches!(handle.next().await, Some(Ok(7))));
+        assert!(handle.next().await.is_none());
+        assert!(handle.result().await.is_ok());
     }
 }
