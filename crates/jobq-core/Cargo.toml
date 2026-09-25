@@ -14,7 +14,7 @@ anyhow = { workspace = true }
 mea = { workspace = true }
 futures = { workspace = true }
 futures-timeout = { workspace = true }
-event-listener = { version = "5.4.1" }
+event-listener = { version = "5.4" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

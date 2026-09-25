@@ -10,7 +10,7 @@ use futures::{
 
 use crate::{
     batch::stream::{
-        member::{MemberSendError, StreamBatchActivity, StreamBatchContext, StreamBatchMember},
+        member::{MemberSendError, StreamBatchContext, StreamBatchMember},
         traits::{BatchStreamEvent, IndependentBatchStreamTask, MultiplexedBatchStreamTask},
     },
     error::Error,
@@ -151,8 +151,6 @@ impl Independent {
         task: &B,
         shared: &B::Shared,
         input: &B::Input,
-        activity: &StreamBatchActivity,
-        index: usize,
         mut member: StreamBatchMember<B::Item>,
     ) -> bool
     where
@@ -172,31 +170,23 @@ impl Independent {
         };
 
         loop {
-            let event = select_biased! {
-                _ = activity.closed(index).fuse() => None,
-                event = AssertUnwindSafe(stream.next())
-                    .catch_unwind()
-                    .fuse() => Some(event),
-            };
-
-            match event {
-                None => {
-                    member.finish(Err(Error::consumer_cancelled()));
-                    return member.failed();
-                }
-                Some(Err(panic)) => {
+            match AssertUnwindSafe(stream.next())
+                .catch_unwind()
+                .await
+            {
+                Err(panic) => {
                     member.finish(Err(Error::from_panic(panic)));
                     return member.failed();
                 }
-                Some(Ok(None)) => {
+                Ok(None) => {
                     member.finish(Ok(()));
                     return member.failed();
                 }
-                Some(Ok(Some(Err(error)))) => {
+                Ok(Some(Err(error))) => {
                     member.finish(Err(Error::task_execution(error)));
                     return member.failed();
                 }
-                Some(Ok(Some(Ok(item)))) => {
+                Ok(Some(Ok(item))) => {
                     if let Err(error) = member.send(Ok(item)).await {
                         member.finish(Err(error));
                         return member.failed();
@@ -277,8 +267,8 @@ where
 
         let mut pending = FuturesUnordered::new();
 
-        for (index, (input, member)) in inputs.iter().zip(members).enumerate() {
-            pending.push(self.run_member(task, &shared, input, &activity, index, member));
+        for (input, member) in inputs.iter().zip(members) {
+            pending.push(self.run_member(task, &shared, input, member));
         }
 
         let mut failed = false;
@@ -308,6 +298,12 @@ mod tests {
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
     };
+    use tokio::{
+        sync::Notify,
+        time::{Duration, timeout},
+    };
+
+    use crate::batch::stream::member::StreamBatchActivity;
 
     struct Events;
 
@@ -489,6 +485,38 @@ mod tests {
         }
     }
 
+    struct Gated {
+        release: Arc<Notify>,
+        wound_down: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl IndependentBatchStreamTask for Gated {
+        type Input = u8;
+        type Shared = ();
+        type Item = u8;
+        type Error = Infallible;
+
+        async fn prepare(&self, _inputs: &[Self::Input]) -> Result<Self::Shared, Self::Error> {
+            Ok(())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            _shared: &'a Self::Shared,
+            input: &'a Self::Input,
+        ) -> BoxStream<'a, Result<Self::Item, Self::Error>> {
+            stream::once(async move { Ok(*input) })
+                .chain(stream::unfold((), move |_| async move {
+                    self.release.notified().await;
+                    self.wound_down.store(true, Ordering::SeqCst);
+
+                    None::<(Result<u8, Infallible>, ())>
+                }))
+                .boxed()
+        }
+    }
+
     struct ConstructorPanic;
 
     #[async_trait]
@@ -589,6 +617,36 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         drop(blocked);
         assert!(matches!(running.await.unwrap(), JobStatus::Failed));
+    }
+
+    #[tokio::test]
+    async fn independent_member_finishes_stream_after_consumer_closes() {
+        let release = Arc::new(Notify::new());
+        let wound_down = Arc::new(AtomicBool::new(false));
+        let (mut handle, setter) =
+            JobStreamHandle::<u8>::new(1, Some(Error::consumer_cancelled())).unwrap();
+        let (context, _) = StreamBatchContext::new(vec![StreamDelivery::new(setter)]);
+        let inputs = [7];
+        let task = Gated {
+            release: release.clone(),
+            wound_down: wound_down.clone(),
+        };
+        let running = tokio::spawn(async move {
+            Independent
+                .run(&task, &inputs, context)
+                .await
+        });
+
+        assert!(matches!(handle.next().await, Some(Ok(7))));
+
+        drop(handle);
+        release.notify_one();
+
+        assert!(matches!(
+            timeout(Duration::from_secs(1), running).await.unwrap().unwrap(),
+            JobStatus::Failed
+        ));
+        assert!(wound_down.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
