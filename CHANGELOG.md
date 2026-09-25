@@ -1,6 +1,12 @@
 # Changelog
 
 ---
+## [0.5.2](https://github.com/wizrds/jobq-rs/compare/0.5.1..0.5.2) - 2026-09-25
+
+### Bug Fixes
+
+- Fix independent stream error handling and panic handling in stream job - ([1381f32](https://github.com/wizrds/jobq-rs/commit/1381f327369de204eb9c0a684a9815ddfdb41041)) - Timothy Pogue
+---
 ## [0.5.1](https://github.com/wizrds/jobq-rs/compare/0.5.0..0.5.1) - 2026-09-25
 
 ### Bug Fixes
