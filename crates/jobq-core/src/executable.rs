@@ -2,9 +2,10 @@ use async_trait::async_trait;
 use futures::{StreamExt, stream::BoxStream};
 
 use crate::{
+    batch::BatchTask,
     error::Error,
     job::JobStatus,
-    task::{BatchStreamTask, BatchTask, StreamTask, Task},
+    task::{StreamTask, Task},
 };
 
 /// A unit of work a worker can execute without knowing its concrete type.
@@ -150,24 +151,6 @@ where
         self.0
             .execute()
             .map(|item| (0, item.map_err(Error::task_execution)))
-            .boxed()
-    }
-}
-
-impl<B> ExecuteStream for Batched<B>
-where
-    B: BatchStreamTask + 'static,
-{
-    type Input = B::Input;
-    type Item = B::Item;
-
-    fn execute<'a>(
-        &'a self,
-        inputs: &'a [B::Input],
-    ) -> BoxStream<'a, (usize, Result<B::Item, Error>)> {
-        self.0
-            .execute(inputs)
-            .map(|(index, item)| (index, item.map_err(Error::task_execution)))
             .boxed()
     }
 }

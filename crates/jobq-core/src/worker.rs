@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use event_listener::Event;
 use futures::{
-    future::{FutureExt, join_all},
+    future::{BoxFuture, FutureExt, join_all},
     select,
 };
 use std::{marker::PhantomData, sync::Arc};
@@ -161,6 +161,21 @@ where
                 .collect::<Vec<_>>(),
         )
         .await;
+    }
+
+    /// Spawns the worker pool on the specified executor.
+    ///
+    /// # Arguments
+    /// * `spawn` - A function that takes a boxed future and spawns it on the executor.
+    ///
+    /// # Returns
+    /// The handle returned by the spawn function.
+    pub fn spawn<S, H>(&self, spawn: S) -> H
+    where
+        S: FnOnce(BoxFuture<'static, ()>) -> H,
+    {
+        let pool = self.clone();
+        spawn(Box::pin(async move { pool.run().await }))
     }
 
     /// Returns a reference to the workers in the pool.

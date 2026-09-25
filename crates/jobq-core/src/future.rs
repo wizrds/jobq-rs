@@ -1,12 +1,12 @@
+use event_listener::Event;
 use futures::{
-    SinkExt, Stream,
-    channel::mpsc,
-    channel::oneshot::{Receiver, Sender, channel},
+    channel::{mpsc, oneshot},
     future::{BoxFuture, join_all, try_join_all},
+    stream::Stream,
 };
 use mea::mutex::Mutex;
 use std::{
-    future::IntoFuture,
+    future::{IntoFuture, poll_fn},
     iter::FromIterator,
     ops::{Deref, DerefMut},
     pin::Pin,
@@ -18,6 +18,184 @@ use std::{
 };
 
 use crate::error::Error;
+
+struct CompletionState {
+    setter: Option<JobFutureSetter<()>>,
+    outcome: Option<Result<(), Error>>,
+}
+
+impl CompletionState {
+    fn new(setter: Option<JobFutureSetter<()>>) -> Self {
+        Self { setter, outcome: None }
+    }
+
+    fn finish(&mut self, outcome: Result<(), Error>) -> bool {
+        if self.outcome.is_some() {
+            return false;
+        }
+
+        self.outcome = Some(outcome.clone());
+
+        if let Some(mut setter) = self.setter.take() {
+            setter.set_result(outcome);
+        }
+
+        true
+    }
+
+    fn is_finished(&self) -> bool {
+        self.outcome.is_some()
+    }
+
+    fn failed(&self) -> bool {
+        self.outcome
+            .as_ref()
+            .is_some_and(Result::is_err)
+    }
+}
+
+struct StreamCompletion {
+    state: std::sync::Mutex<CompletionState>,
+}
+
+impl StreamCompletion {
+    fn new(setter: Option<JobFutureSetter<()>>) -> Self {
+        Self {
+            state: std::sync::Mutex::new(CompletionState::new(setter)),
+        }
+    }
+
+    fn finish(&self, outcome: Result<(), Error>) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .finish(outcome)
+    }
+
+    fn is_finished(&self) -> bool {
+        self.state.lock().unwrap().is_finished()
+    }
+
+    fn failed(&self) -> bool {
+        self.state.lock().unwrap().failed()
+    }
+}
+
+struct CloseSignal {
+    closed: AtomicBool,
+    event: Event,
+}
+
+impl CloseSignal {
+    fn new() -> Self {
+        Self {
+            closed: AtomicBool::new(false),
+            event: Event::new(),
+        }
+    }
+
+    fn close(&self) {
+        if !self.closed.swap(true, Ordering::AcqRel) {
+            self.event.notify(usize::MAX);
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    async fn closed(&self) {
+        let listener = self.event.listen();
+
+        if self.is_closed() {
+            return;
+        }
+
+        listener.await;
+    }
+}
+
+struct StreamLifecycleInner {
+    completion: StreamCompletion,
+    closure: CloseSignal,
+    receiver_drop_error: Option<Error>,
+}
+
+impl StreamLifecycleInner {
+    fn new(setter: Option<JobFutureSetter<()>>, receiver_drop_error: Option<Error>) -> Self {
+        Self {
+            completion: StreamCompletion::new(setter),
+            closure: CloseSignal::new(),
+            receiver_drop_error,
+        }
+    }
+
+    fn set_terminal(&self, outcome: Result<(), Error>) -> bool {
+        if !self.completion.finish(outcome) {
+            return false;
+        }
+
+        self.closure.close();
+
+        true
+    }
+
+    fn receiver_dropped(&self) {
+        if let Some(error) = &self.receiver_drop_error {
+            self.set_terminal(Err(error.clone()));
+        }
+
+        self.closure.close();
+    }
+
+    fn is_open(&self) -> bool {
+        !self.closure.is_closed() && !self.completion.is_finished()
+    }
+
+    fn failed(&self) -> bool {
+        self.completion.failed()
+    }
+
+    async fn closed(&self) {
+        self.closure.closed().await;
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct StreamLifecycle {
+    inner: Arc<StreamLifecycleInner>,
+}
+
+impl StreamLifecycle {
+    pub(crate) fn new(
+        setter: Option<JobFutureSetter<()>>,
+        receiver_drop_error: Option<Error>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(StreamLifecycleInner::new(setter, receiver_drop_error)),
+        }
+    }
+
+    pub(crate) fn set_terminal(&self, outcome: Result<(), Error>) -> bool {
+        self.inner.set_terminal(outcome)
+    }
+
+    pub(crate) fn receiver_dropped(&self) {
+        self.inner.receiver_dropped();
+    }
+
+    pub(crate) fn is_open(&self) -> bool {
+        self.inner.is_open()
+    }
+
+    pub(crate) fn failed(&self) -> bool {
+        self.inner.failed()
+    }
+
+    pub(crate) async fn closed(&self) {
+        self.inner.closed().await;
+    }
+}
 
 /// Represents a future that can be awaited to get the result of a [`Job`](crate::job::Job).
 pub struct JobFuture<T>
@@ -37,7 +215,7 @@ where
     /// A tuple containing the [`JobFuture`](crate::future::JobFuture) instance and a [`JobFutureSetter`](crate::future::JobFutureSetter)
     /// that can be used to set the result of the job.
     pub fn new() -> (Self, JobFutureSetter<T>) {
-        let (sender, receiver) = channel();
+        let (sender, receiver) = oneshot::channel();
         let setter = JobFutureSetter { sender: Some(sender) };
 
         (
@@ -105,7 +283,7 @@ where
     T: Send + Sync,
 {
     result: Option<Result<T, Error>>,
-    receiver: Option<Receiver<Result<T, Error>>>,
+    receiver: Option<oneshot::Receiver<Result<T, Error>>>,
     closed: AtomicBool,
 }
 
@@ -116,7 +294,7 @@ pub struct JobFutureSetter<T>
 where
     T: Send + Sync,
 {
-    sender: Option<Sender<Result<T, Error>>>,
+    sender: Option<oneshot::Sender<Result<T, Error>>>,
 }
 
 impl<T> JobFutureSetter<T>
@@ -140,17 +318,46 @@ where
     T: Send + Sync,
 {
     receiver: mpsc::Receiver<Result<T, Error>>,
+    lifecycle: StreamLifecycle,
 }
 
 impl<T> JobStream<T>
 where
     T: Send + Sync,
 {
-    /// Creates a bounded stream and its setter with the given channel capacity.
-    pub fn new(capacity: usize) -> (Self, JobStreamSetter<T>) {
-        let (sender, receiver) = mpsc::channel(capacity);
+    pub fn new(capacity: usize) -> Result<(Self, JobStreamSetter<T>), Error> {
+        Self::with_lifecycle(capacity, StreamLifecycle::new(None, None))
+    }
 
-        (Self { receiver }, JobStreamSetter { sender })
+    fn with_lifecycle(
+        capacity: usize,
+        lifecycle: StreamLifecycle,
+    ) -> Result<(Self, JobStreamSetter<T>), Error> {
+        Ok(Self::with_buffer(
+            capacity
+                .checked_sub(1)
+                .filter(|buffer| *buffer < (usize::MAX >> 2))
+                .ok_or_else(|| Error::invalid_stream_capacity(capacity))?,
+            lifecycle,
+        ))
+    }
+
+    fn with_buffer(buffer: usize, lifecycle: StreamLifecycle) -> (Self, JobStreamSetter<T>) {
+        let (sender, receiver) = mpsc::channel(buffer);
+
+        (
+            Self { receiver, lifecycle: lifecycle.clone() },
+            JobStreamSetter::new(sender, lifecycle),
+        )
+    }
+}
+
+impl<T> Drop for JobStream<T>
+where
+    T: Send + Sync,
+{
+    fn drop(&mut self) {
+        self.lifecycle.receiver_dropped();
     }
 }
 
@@ -171,18 +378,37 @@ where
     T: Send + Sync,
 {
     sender: mpsc::Sender<Result<T, Error>>,
+    lifecycle: StreamLifecycle,
 }
 
 impl<T> JobStreamSetter<T>
 where
     T: Send + Sync,
 {
+    fn new(sender: mpsc::Sender<Result<T, Error>>, lifecycle: StreamLifecycle) -> Self {
+        Self { sender, lifecycle }
+    }
+
+    pub(crate) fn lifecycle(&self) -> StreamLifecycle {
+        self.lifecycle.clone()
+    }
+
     /// Sends one item to the [`JobStream`], awaiting if the channel is full.
     pub async fn send(&mut self, item: Result<T, Error>) -> Result<(), Error> {
-        self.sender
-            .send(item)
+        poll_fn(|cx| self.sender.poll_ready(cx))
             .await
+            .map_err(|_| Error::future_closed())?;
+
+        self.sender
+            .start_send(item)
             .map_err(|_| Error::future_closed())
+    }
+
+    pub fn try_send(
+        &mut self,
+        item: Result<T, Error>,
+    ) -> Result<(), mpsc::TrySendError<Result<T, Error>>> {
+        self.sender.try_send(item)
     }
 
     pub fn is_closed(&self) -> bool {
@@ -204,8 +430,17 @@ impl<T> JobStreamHandle<T>
 where
     T: Send + Sync + 'static,
 {
-    pub(crate) fn new(items: JobStream<T>, result: JobFuture<()>) -> Self {
-        Self { items, result }
+    pub(crate) fn new(
+        capacity: usize,
+        receiver_drop_error: Option<Error>,
+    ) -> Result<(Self, JobStreamSetter<T>), Error> {
+        let (result, setter) = JobFuture::new();
+        let (items, sender) = JobStream::with_lifecycle(
+            capacity,
+            StreamLifecycle::new(Some(setter), receiver_drop_error),
+        )?;
+
+        Ok((Self { items, result }, sender))
     }
 
     /// Awaits the terminal outcome of the stream.
@@ -333,5 +568,118 @@ where
 {
     fn from(futures: Vec<JobFuture<T>>) -> Self {
         Self { futures }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::{FutureExt, StreamExt};
+
+    #[test]
+    fn rejects_zero_and_unsupported_capacity() {
+        assert!(matches!(JobStream::<u8>::new(0), Err(Error::InvalidStreamCapacity(0))));
+        assert!(matches!(
+            JobStream::<u8>::new((usize::MAX >> 2) + 1),
+            Err(Error::InvalidStreamCapacity(_))
+        ));
+        assert!(matches!(
+            JobStreamHandle::<u8>::new(0, None),
+            Err(Error::InvalidStreamCapacity(0))
+        ));
+    }
+
+    #[tokio::test]
+    async fn one_sender_observes_total_capacity() {
+        for capacity in [1, 2, 8] {
+            let (mut stream, mut setter) = JobStream::<usize>::new(capacity).unwrap();
+
+            for item in 0..capacity {
+                setter.try_send(Ok(item)).unwrap();
+            }
+
+            let rejected = setter
+                .try_send(Ok(capacity))
+                .unwrap_err();
+            assert!(rejected.is_full());
+            assert!(matches!(rejected.into_inner(), Ok(item) if item == capacity));
+
+            for item in 0..capacity {
+                assert_eq!(stream.next().await.unwrap().unwrap(), item);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn full_and_disconnected_attempts_return_the_item() {
+        let (stream, mut setter) = JobStream::<u8>::new(1).unwrap();
+        setter.try_send(Ok(1)).unwrap();
+
+        let full = setter.try_send(Ok(2)).unwrap_err();
+        assert!(full.is_full());
+        assert!(matches!(full.into_inner(), Ok(2)));
+
+        drop(stream);
+
+        let closed = setter.try_send(Ok(3)).unwrap_err();
+        assert!(closed.is_disconnected());
+        assert!(matches!(closed.into_inner(), Ok(3)));
+    }
+
+    #[tokio::test]
+    async fn awaited_send_waits_only_for_channel_capacity() {
+        let (mut stream, mut setter) = JobStream::<u8>::new(1).unwrap();
+        setter.try_send(Ok(1)).unwrap();
+
+        let send = setter.send(Ok(2));
+        futures::pin_mut!(send);
+        assert!(send.as_mut().now_or_never().is_none());
+
+        assert!(matches!(stream.next().await, Some(Ok(1))));
+        send.await.unwrap();
+        assert!(matches!(stream.next().await, Some(Ok(2))));
+    }
+
+    #[tokio::test]
+    async fn receiver_drop_wakes_and_settles_batch_result() {
+        let (handle, setter) =
+            JobStreamHandle::<u8>::new(1, Some(Error::consumer_cancelled())).unwrap();
+        let lifecycle = setter.lifecycle();
+        let (items, result) = handle.split();
+        let closed = lifecycle.closed();
+        futures::pin_mut!(closed);
+
+        assert!(closed.as_mut().now_or_never().is_none());
+        drop(items);
+        closed.await;
+
+        assert!(matches!(result.result().await, Err(Error::ConsumerCancelled)));
+    }
+
+    #[tokio::test]
+    async fn first_terminal_result_survives_receiver_drop() {
+        let (handle, setter) =
+            JobStreamHandle::<u8>::new(1, Some(Error::consumer_cancelled())).unwrap();
+        let lifecycle = setter.lifecycle();
+        let (items, result) = handle.split();
+
+        assert!(lifecycle.set_terminal(Ok(())));
+        drop(items);
+        assert!(!lifecycle.set_terminal(Err(Error::incomplete_stream_batch())));
+        assert!(result.result().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn accepted_items_drain_after_terminal_result() {
+        let (mut handle, mut setter) = JobStreamHandle::<u8>::new(2, None).unwrap();
+        setter.try_send(Ok(1)).unwrap();
+        setter.try_send(Ok(2)).unwrap();
+        setter.lifecycle().set_terminal(Ok(()));
+        drop(setter);
+
+        assert!(handle.result().await.is_ok());
+        assert!(matches!(handle.next().await, Some(Ok(1))));
+        assert!(matches!(handle.next().await, Some(Ok(2))));
+        assert!(handle.next().await.is_none());
     }
 }

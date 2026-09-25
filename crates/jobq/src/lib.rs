@@ -14,7 +14,10 @@
 //! - **[`Task`]**: an async unit of work that returns one final result.
 //! - **[`StreamTask`]**: a task that yields many items over time.
 //! - **[`BatchTask`]**: one async call that processes inputs and returns one result per input.
-//! - **[`BatchStreamTask`]**: one stream whose items identify their input by index.
+//! - **[`MultiplexedBatchStreamTask`]**: one stream whose items identify their input by index.
+//! - **[`IndependentBatchStreamTask`]**: a per-input stream that shares one prepared value.
+//! - **[`Multiplexed`] / [`Independent`]**: the two [`StreamBatchMode`] implementations
+//!   selecting between them.
 //! - **[`BatchPolicy`]**: a batch's maximum size and wait time.
 //! - **[`Batcher`] / [`StreamBatcher`]**: handles for submitting inputs to batch tasks and streams.
 //! - **[`JobFuture`]**: a handle for awaiting one task or batch input's final result.
@@ -67,10 +70,7 @@
 //!         .with_num_workers(2)
 //!         .build();
 //!
-//!     let worker_pool_clone = worker_pool.clone();
-//!     let handle = tokio::spawn(async move {
-//!         worker_pool_clone.run().await;
-//!     });
+//!     let pool_handle = worker_pool.spawn(tokio::spawn);
 //!
 //!     let future = job_queue
 //!         .enqueue_job(JobOptions::new(MyTask { n: 42 }).with_max_retries(3))
@@ -88,7 +88,7 @@
 //!     }
 //!
 //!     worker_pool.shutdown().await;
-//!     handle.await.unwrap();
+//!     pool_handle.await.unwrap();
 //! }
 //! ```
 //!
@@ -134,18 +134,16 @@
 //!         .with_num_workers(1)
 //!         .build();
 //!
-//!     let running = tokio::spawn({
-//!         let worker_pool = worker_pool.clone();
-//!         async move { worker_pool.run().await }
-//!     });
+//!     let pool_handle = worker_pool.spawn(tokio::spawn);
 //!
-//!     let batcher = queue.batcher(
-//!         DoubleBatch,
-//!         BatchPolicy {
+//!     let batcher = queue
+//!         .batcher(DoubleBatch)
+//!         .policy(BatchPolicy {
 //!             max_size: 2,
 //!             max_wait: Duration::from_millis(50),
-//!         },
-//!     );
+//!         })
+//!         .build();
+//!
 //!     let first = batcher.enqueue(JobOptions::new(21)).await.unwrap();
 //!     let second = batcher.enqueue(JobOptions::new(7)).await.unwrap();
 //!
@@ -153,7 +151,7 @@
 //!     assert_eq!(second.result().await.unwrap(), 14);
 //!
 //!     worker_pool.shutdown().await;
-//!     running.await.unwrap();
+//!     pool_handle.await.unwrap();
 //! }
 //! ```
 //!
@@ -200,10 +198,7 @@
 //!         .with_num_workers(2)
 //!         .build();
 //!
-//!     let worker_pool_clone = worker_pool.clone();
-//!     let handle = tokio::spawn(async move {
-//!         worker_pool_clone.run().await;
-//!     });
+//!     let pool_handle = worker_pool.spawn(tokio::spawn);
 //!
 //!     let mut stream_handle = job_queue
 //!         .enqueue_stream(JobStreamOptions::new(MyStreamTask).with_capacity(16))
@@ -217,27 +212,40 @@
 //!     stream_handle.result().await.unwrap();
 //!
 //!     worker_pool.shutdown().await;
-//!     handle.await.unwrap();
+//!     pool_handle.await.unwrap();
 //! }
 //! ```
 //!
 //! The worker polls the stream. Each [`JobStreamHandle`] yields produced items and its `result()`
-//! reports the terminal outcome. Streaming tasks are not retried.
+//! reports the terminal outcome. [`JobStreamOptions::with_capacity`] sets the handle's channel
+//! capacity; a capacity of zero is rejected as [`Error::InvalidStreamCapacity`] before the job
+//! reaches the queue.
 //!
 //! # Batch streams
 //!
-//! Implement [`BatchStreamTask`] to produce items for several inputs from one stream. Every
-//! item is a `(usize, Result<Item, Error>)` pair. The zero-based index selects the member's
-//! [`JobStreamHandle`], and one member can receive any number of items:
+//! A batch stream shares one batching window across several inputs, each with its own
+//! [`JobStreamHandle`], and delivers items to those handles as they are produced. Two modes
+//! select how the shared work relates to each input:
+//!
+//! | Mode | Producer | Full member channel |
+//! | --- | --- | --- |
+//! | [`Multiplexed`] | One stream tags each item with its input's index. | [`Error::ConsumerLag`] fails only that member. |
+//! | [`Independent`] | One stream per input, sharing one prepared value. | Backpressure; a slow member never affects its siblings. |
+//!
+//! Implement [`MultiplexedBatchStreamTask`] when one stream naturally produces items for every
+//! input together:
 //!
 //! ```rust,ignore
 //! use std::{convert::Infallible, time::Duration};
 //! use futures::{StreamExt, stream::{self, BoxStream}};
-//! use jobq::{BatchPolicy, BatchStreamTask, JobQueueSystemBuilder, JobStreamOptions};
+//! use jobq::{
+//!     BatchPolicy, BatchStreamEvent, JobQueueSystemBuilder, JobStreamOptions,
+//!     Multiplexed, MultiplexedBatchStreamTask, StreamBatchActivity,
+//! };
 //!
 //! struct TimesTen;
 //!
-//! impl BatchStreamTask for TimesTen {
+//! impl MultiplexedBatchStreamTask for TimesTen {
 //!     type Input = u32;
 //!     type Item = u32;
 //!     type Error = Infallible;
@@ -245,14 +253,14 @@
 //!     fn execute<'a>(
 //!         &'a self,
 //!         inputs: &'a [Self::Input],
-//!     ) -> BoxStream<'a, (usize, Result<Self::Item, Self::Error>)> {
-//!         stream::iter(
-//!             inputs
-//!                 .iter()
-//!                 .copied()
-//!                 .enumerate()
-//!                 .map(|(index, input)| (index, Ok(input * 10))),
-//!         )
+//!         _activity: &'a StreamBatchActivity,
+//!     ) -> BoxStream<'a, BatchStreamEvent<Self::Item, Self::Error>> {
+//!         stream::iter(inputs.iter().copied().enumerate().flat_map(|(index, input)| {
+//!             [
+//!                 BatchStreamEvent::Item { index, item: Ok(input * 10) },
+//!                 BatchStreamEvent::Finished { index, outcome: Ok(()) },
+//!             ]
+//!         }))
 //!         .boxed()
 //!     }
 //! }
@@ -263,18 +271,17 @@
 //!         .with_num_workers(1)
 //!         .build();
 //!
-//!     let running = tokio::spawn({
-//!         let worker_pool = worker_pool.clone();
-//!         async move { worker_pool.run().await }
-//!     });
+//!     let pool_handle = worker_pool.spawn(tokio::spawn);
 //!
-//!     let batcher = queue.stream_batcher(
-//!         TimesTen,
-//!         BatchPolicy {
+//!     let batcher = queue
+//!         .stream_batcher(TimesTen)
+//!         .mode(Multiplexed)
+//!         .policy(BatchPolicy {
 //!             max_size: 2,
 //!             max_wait: Duration::from_millis(50),
-//!         },
-//!     );
+//!         })
+//!         .build();
+//!
 //!     let mut first = batcher.enqueue(JobStreamOptions::new(2)).await.unwrap();
 //!     let mut second = batcher.enqueue(JobStreamOptions::new(3)).await.unwrap();
 //!
@@ -282,17 +289,98 @@
 //!     assert_eq!(second.next().await.unwrap().unwrap(), 30);
 //!     assert!(first.next().await.is_none());
 //!     assert!(second.next().await.is_none());
+//!
 //!     first.result().await.unwrap();
 //!     second.result().await.unwrap();
 //!
 //!     worker_pool.shutdown().await;
-//!     running.await.unwrap();
+//!     pool_handle.await.unwrap();
 //! }
 //! ```
 //!
-//! Each [`JobStreamOptions`] sets that member's channel capacity and queue options. Stream item
-//! errors arrive on that member's handle. Out-of-range indexes are ignored; a panic fails every
-//! member's terminal `result()`. Batch streams are not retried.
+//! Implement [`IndependentBatchStreamTask`] when each input needs its own stream built from one
+//! value shared across the batch:
+//!
+//! ```rust,ignore
+//! use std::{convert::Infallible, time::Duration};
+//! use futures::{StreamExt, stream::{self, BoxStream}};
+//! use jobq::{
+//!     BatchPolicy, Independent, IndependentBatchStreamTask, JobQueueSystemBuilder,
+//!     JobStreamOptions,
+//! };
+//!
+//! struct Ranges;
+//!
+//! #[async_trait::async_trait]
+//! impl IndependentBatchStreamTask for Ranges {
+//!     type Input = u32;
+//!     type Shared = u32;
+//!     type Item = u32;
+//!     type Error = Infallible;
+//!
+//!     async fn prepare(&self, inputs: &[Self::Input]) -> Result<Self::Shared, Self::Error> {
+//!         Ok(inputs.iter().sum())
+//!     }
+//!
+//!     fn stream<'a>(
+//!         &'a self,
+//!         shared: &'a Self::Shared,
+//!         input: &'a Self::Input,
+//!     ) -> BoxStream<'a, Result<Self::Item, Self::Error>> {
+//!         stream::iter(0..*input)
+//!             .map(move |offset| Ok(shared + offset))
+//!             .boxed()
+//!     }
+//! }
+//!
+//! #[tokio::main]
+//! async fn main() {
+//!     let (queue, worker_pool) = JobQueueSystemBuilder::fifo(10)
+//!         .with_num_workers(1)
+//!         .build();
+//!
+//!     let pool_handle = worker_pool.spawn(tokio::spawn);
+//!
+//!     let batcher = queue
+//!         .stream_batcher(Ranges)
+//!         .mode(Independent)
+//!         .policy(BatchPolicy {
+//!             max_size: 2,
+//!             max_wait: Duration::from_millis(50),
+//!         })
+//!         .build();
+//!
+//!     let mut first = batcher.enqueue(JobStreamOptions::new(2)).await.unwrap();
+//!     let mut second = batcher.enqueue(JobStreamOptions::new(1)).await.unwrap();
+//!
+//!     assert_eq!(first.next().await.unwrap().unwrap(), 3);
+//!     assert_eq!(first.next().await.unwrap().unwrap(), 4);
+//!     assert!(first.next().await.is_none());
+//!     assert_eq!(second.next().await.unwrap().unwrap(), 3);
+//!     assert!(second.next().await.is_none());
+//!
+//!     first.result().await.unwrap();
+//!     second.result().await.unwrap();
+//!
+//!     worker_pool.shutdown().await;
+//!     pool_handle.await.unwrap();
+//! }
+//! ```
+//!
+//! Each submission has its own [`JobStreamHandle`] and [`JobStreamOptions`], including its
+//! channel capacity; a zero capacity is rejected the same way as for a plain stream.
+//! [`IndependentBatchStreamTask::prepare`] runs once per batch: an error or panic there fails
+//! every member that hasn't already finished. A panic constructing or polling one member's
+//! stream fails only that member; its siblings continue. When a member's consumer drops its
+//! [`JobStreamHandle`], that member receives [`Error::ConsumerCancelled`]. Rejection at the
+//! queue reaches every pending caller directly, and dropping one caller's future before it joins
+//! the batch does not cancel a sibling that already joined. Batch streams are not retried.
+//!
+//! Implementing a mode beyond [`Multiplexed`] and [`Independent`] means implementing
+//! [`StreamBatchMode`] directly. Its `run` method receives the task, the sealed inputs, and a
+//! [`StreamBatchContext`] whose members are exposed as [`StreamBatchMember`] values for sending
+//! items and finishing each one, plus a [`StreamBatchActivity`] for observing per-member
+//! cancellation.
 //!
 //! # Shared handles
 //!
