@@ -1,6 +1,12 @@
 # Changelog
 
 ---
+## [0.5.0](https://github.com/wizrds/jobq-rs/compare/0.4.0..0.5.0) - 2026-09-25
+
+### Features
+
+-  [**breaking**]Rework stream batching to support multiplexed and independent modes  - ([4b95136](https://github.com/wizrds/jobq-rs/commit/4b95136896dd773f5592203f4ed0dad76729ed7f)) - Timothy Pogue
+---
 ## [0.4.0](https://github.com/wizrds/jobq-rs/compare/0.3.1..0.4.0) - 2026-09-23
 
 ### Features
